@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from . import autocad
+from . import autocad, confirm
 
 # INSUNITS (DXF $INSUNITS). Only the values a mechanical or architectural
 # drawing realistically carries are named; anything else is reported by number.
@@ -407,6 +407,42 @@ def blocks(drawing: Path, limit: int | None = None, timeout: float | None = None
     return data
 
 
+def _lisp_string(value: str) -> str:
+    """Escape a value for an AutoLISP string literal.
+
+    AutoCAD forbids quotes and backslashes in layer names, so this is belt and
+    braces - but a name arriving from somewhere else must not be able to close
+    the literal and inject code into a script that is about to modify a file.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _layer_apply_body(name: str, color: int, flags: int) -> str:
+    """Modify one layer record, then save.
+
+    `(command "_.QSAVE")` is the single deliberate exception to this module's
+    no-`command` rule: there is no other way to save from the core engine.
+    ActiveX is not an option - `vl-load-com` succeeds but
+    `(vlax-get-acad-object)` returns nil headless, so `vla-save` reports success
+    and changes nothing. That silent no-op is exactly why the write path
+    re-opens the file afterwards and verifies rather than trusting this script.
+    """
+    return f"""
+(setq e (tblobjname "LAYER" "{_lisp_string(name)}"))
+(if e
+  (progn
+    (setq d (entget e))
+    (setq d (subst (cons 62 {color}) (assoc 62 d) d))
+    (setq d (subst (cons 70 {flags}) (assoc 70 d) d))
+    (if (entmod d)
+      (write-line "applied|yes" f)
+      (write-line "applied|no" f)))
+  (write-line "applied|absent" f))
+(command "_.QSAVE")
+(write-line "saved|yes" f)
+"""
+
+
 def _as_float(value: str, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -564,3 +600,148 @@ def text(drawing: Path, limit: int | None = None, timeout: float | None = None) 
     if truncated:
         data["truncated"] = True
     return data
+
+
+def _find_layer(drawing: Path, name: str, timeout: float | None) -> dict[str, Any]:
+    """Current state of one layer, or E_NOT_FOUND naming what is there."""
+    table = layers(drawing, timeout=timeout)["layers"]
+    for layer in table:
+        if layer["name"] == name:
+            return layer
+    raise autocad.EngineError(
+        "E_NOT_FOUND",
+        f"the drawing has no layer named {name!r}",
+        layer=name,
+        available=[entry["name"] for entry in table][:40],
+    )
+
+
+def _desired(current: dict[str, Any], **wanted: Any) -> dict[str, Any]:
+    """Merge the requested changes onto the observed state."""
+    target = {key: current[key] for key in ("color", "on", "frozen", "locked")}
+    for key, value in wanted.items():
+        if value is not None:
+            target[key] = value
+    return target
+
+
+def _encode(state: dict[str, Any]) -> tuple[int, int]:
+    """Back to the DXF pair: 62 signed for on/off, 70 bit-packed."""
+    color = abs(int(state["color"])) or 7
+    if not state["on"]:
+        color = -color
+    flags = (_FROZEN_BIT if state["frozen"] else 0) | (_LOCKED_BIT if state["locked"] else 0)
+    return color, flags
+
+
+def set_layer(
+    drawing: Path,
+    name: str,
+    *,
+    color: int | None = None,
+    on: bool | None = None,
+    frozen: bool | None = None,
+    locked: bool | None = None,
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Change one layer's colour or on/frozen/locked state.
+
+    The smallest useful write in the tool: bounded to a single named object, and
+    reversible by running the inverse command. Even so it goes through the full
+    gate - permission, preview, single-use token, backup, and an independent
+    read-back - because the machinery has to be right before anything larger
+    uses it.
+    """
+    # Fail closed before doing any work, so an agent learns it cannot write at
+    # the moment it plans the write rather than after building on the preview.
+    confirm.require_write_permission()
+
+    requested = {"color": color, "on": on, "frozen": frozen, "locked": locked}
+    if all(value is None for value in requested.values()):
+        raise autocad.EngineError(
+            "E_VALIDATION",
+            "nothing to change: pass at least one of --color/--on/--off/"
+            "--freeze/--thaw/--lock/--unlock",
+        )
+    if color is not None and not 1 <= color <= 255:
+        raise autocad.EngineError(
+            "E_VALIDATION", "--color must be an AutoCAD Color Index in 1..255", color=color
+        )
+
+    current = _find_layer(drawing, name, timeout)
+    target = _desired(current, **requested)
+    changed = {k: (current[k], target[k]) for k in target if current[k] != target[k]}
+
+    scope = confirm.scope(
+        command="layer set",
+        target=drawing,
+        arguments={"name": name, **{k: v for k, v in requested.items() if v is not None}},
+        observed=current,
+    )
+    preview = {
+        "changes": [
+            {
+                "action": "modify",
+                "resource": "layer",
+                "id": name,
+                "before": {k: current[k] for k in changed},
+                "after": {k: target[k] for k in changed},
+            }
+        ]
+        if changed
+        else [],
+        "no_op": not changed,
+    }
+
+    if dry_run:
+        token = confirm.mint(scope)
+        return {
+            "preview": preview,
+            "confirm_token": token.value,
+            "expires_at": token.expires_at,
+            "_untrusted": ["preview"],
+        }
+
+    if confirm_token is None:
+        raise autocad.EngineError(
+            "E_CONFIRMATION_REQUIRED",
+            "run the same command with --dry-run to obtain a confirm token",
+        )
+
+    # Spends the token; any mismatch with the scope raises E_CONFLICT.
+    confirm.verify_and_consume(confirm_token, scope)
+
+    backup_path = confirm.backup(drawing)
+    color_code, flags = _encode(target)
+    records = autocad.run_script(
+        _layer_apply_body(name, color_code, flags),
+        drawing=drawing,
+        readonly=False,
+        timeout=timeout,
+    )
+    applied = _first(records, "applied")
+
+    # Re-open the file from disk in a fresh engine run. The in-memory result of
+    # the write cannot vouch for what actually landed.
+    observed = _find_layer(drawing, name, timeout)
+    matches = all(observed[key] == value for key, value in target.items())
+
+    return {
+        "layer": name,
+        "applied": applied == "yes",
+        "changed": bool(changed),
+        "before": current,
+        "after": observed,
+        "verification": {
+            "level": "reopened-and-compared",
+            "matches": matches,
+            "intended": target,
+        },
+        "backup": str(backup_path) if backup_path else None,
+        "backup_note": (
+            "byte copy of the file as it was on disk; unsaved editor state is not covered"
+        ),
+        "_untrusted": ["layer", "before", "after"],
+    }

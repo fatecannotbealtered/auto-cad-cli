@@ -72,6 +72,7 @@ Worst-case risk tier: **T1** - it writes drawing files and drives a licensed Aut
 | Text | `text extract` | TEXT/MTEXT/ATTDEF strings with layer and position. |
 | Sheets | `layout list` | Layouts with paper size, plot device and scale. |
 | Xrefs | `xref list` | External references and whether their files exist. |
+| Layer edit | `layer set` | **Write.** Colour and on/frozen/locked state, behind the confirm gate. |
 | Self-description | `reference`, `context`, `doctor`, `changelog`, `update` | Bootstrap an Agent with live capabilities and version deltas. |
 
 The README is intentionally a map, not the full manual. Agents should call `auto-cad-cli reference --compact` for exact flags, schemas, permissions, exit codes, and error codes before executing task commands.

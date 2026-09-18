@@ -37,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   location, language and engine path; `AUTO_CAD_CLI_ACAD_HOME` overrides
   discovery and `AUTO_CAD_CLI_TIMEOUT` bounds engine calls.
 
+- `layer set`: the first write command, and the full CLI-SPEC section 7 gate
+  behind it. Writes are disabled until a human sets `{"permission": "write"}` in
+  the config file - there is deliberately no command to enable them, so an agent
+  cannot escalate itself. A `--dry-run` mints a single-use confirm token bound by
+  HMAC to the command, its arguments, the file's digest, the layer's observed
+  state, the account and the permission mode; anything changing in between voids
+  it. The file is backed up before the write and re-opened afterwards in a fresh
+  engine run to verify what actually landed.
+- `AUTO_CAD_CLI_STATE_DIR` relocates the permission config, confirm secret,
+  ledger and backups, so tests never touch the operator's real state.
+
 ### Fixed
 
 - Scripts handed to the AutoCAD core engine are now written in the system

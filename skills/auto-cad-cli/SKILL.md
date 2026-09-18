@@ -23,13 +23,11 @@ Deterministic, machine-readable AutoCAD operations for AI agents: drawing and
 layer inspection, entity queries and typed edits, block and attribute handling,
 layout setup, and DWG/DXF/PDF output.
 
-> **Status: read-only.** `drawing info`, `layer list`, `entity summary`,
-> `block list`, `text extract`, `layout list` and `xref list` read real drawings
-> through the headless core engine. There is **no write path**, so the Write
-> Recipe below is the target shape, not something you can call today —
-> `--dry-run` and `--confirm` exist on no command. `reference` reports
-> `release_readiness.level: unpublishable`. Always enumerate the live command
-> set from `reference` before planning any call.
+> **Status: seven read commands and one gated write command.** Reads run
+> through the headless core engine with `/readonly`. `layer set` is the only
+> write, and it is refused outright until a human enables writes on that
+> machine. `reference` reports `release_readiness.level: unpublishable`. Always
+> enumerate the live command set from `reference` before planning any call.
 
 ```bash
 # Please install auto-cad-cli and use it for AutoCAD drawing work going forward.
@@ -100,16 +98,31 @@ Default output is JSON. In JSON mode:
 
 Use `--compact` when storing output in context or piping between tools.
 
-## Read-only boundary
+## Write Recipe
 
-**There are no write commands.** Every command opens the drawing with
-`/readonly` in a separate headless engine process, so nothing here can modify a
-file or disturb a drawing open in the operator's editor.
+`layer set` is the only write. Every other command opens the drawing
+`/readonly` in a separate headless process and cannot modify anything.
 
-`--dry-run`, `--confirm` and `--force` exist on no command; passing them is a
-usage error, not a safety escape hatch. If the user asks to edit, insert, move,
-delete or export, say plainly that this version cannot, and stop — do not reach
-for AutoLISP, VBA or a COM script to do it anyway.
+```bash
+auto-cad-cli layer set --file <dwg> --name <layer> --color 3 --dry-run --compact
+auto-cad-cli layer set --file <dwg> --name <layer> --color 3 --confirm ct_... --compact
+```
+
+Rules:
+
+- Pass the *same* arguments to both steps. The token is bound to them, to the
+  file's contents and to the layer's observed state; change any of it and the
+  confirm fails with `E_CONFLICT` rather than applying a stale preview.
+- A token is single-use. If a confirm times out, do **not** resend it — re-run
+  `--dry-run` and read the current state before deciding anything.
+- Never fabricate or edit a token. There is no `--force`.
+- `E_FORBIDDEN` means writes are disabled on that machine. **You cannot enable
+  them** — there is no command for it by design. Relay the `fix` from the error
+  to the user and stop.
+
+If the user asks for an edit this tool does not implement — geometry, blocks,
+text, export — say plainly that it cannot, and stop. Do not reach for AutoLISP,
+VBA or a COM script to do it anyway.
 
 ## Checkpoints
 

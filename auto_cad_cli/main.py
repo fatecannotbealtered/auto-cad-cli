@@ -1,8 +1,12 @@
 """Entry point: global flag parsing, dispatch, and the self-describing commands.
 
-Drawing commands are read-only and served by the headless core engine, so they
-run without an AutoCAD window and cannot disturb one that is open. There is no
-write path yet; `doctor` says so rather than leaving an agent to infer it.
+Read commands are served by the headless core engine with `/readonly`, so they
+run without an AutoCAD window and cannot disturb one that is open.
+
+The single write command goes through the full gate: permission a human enabled,
+`--dry-run` preview, a single-use confirm token, a backup, and an independent
+read-back. `doctor` reports the permission state rather than leaving an agent to
+discover it by being refused.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, autocad, changelog, drawing
+from . import __version__, autocad, changelog, confirm, drawing
 from .contract_gen import CODES
 from .envelope import Options, Timer, emit_error, emit_ok
 
@@ -27,7 +31,7 @@ HELP = f"""{TOOL} {__version__} - agent-native CLI for Autodesk AutoCAD
 
 Usage: {TOOL} <command> [flags]
 
-Commands (all read-only; the drawing is opened /readonly in a headless engine):
+Read commands (the drawing is opened /readonly in a headless engine):
   drawing info --file <dwg>      Identity, units, extents, layouts, object counts
   layer list --file <dwg>        Layer table with colour and on/frozen/locked state
   entity summary --file <dwg>    Object counts by DXF type
@@ -35,6 +39,10 @@ Commands (all read-only; the drawing is opened /readonly in a headless engine):
   text extract --file <dwg>      TEXT/MTEXT/ATTDEF strings with layer and position
   layout list --file <dwg>       Sheets with paper size, plot device and scale
   xref list --file <dwg>         External references and whether their files exist
+
+Write command (needs write permission, then --dry-run -> --confirm):
+  layer set --file <dwg> --name <layer> [--color N] [--on|--off]
+            [--freeze|--thaw] [--lock|--unlock]
 
   reference [--command <path>]   Declared capabilities, schemas and error codes
   context                        Runtime environment, configuration, credentials
@@ -62,9 +70,9 @@ RELEASE_READINESS = {
     "live_smoke_required_for_stable": True,
     "live_smoke_status": "missing",
     "reason": (
-        "Read-only drawing commands run against a real AutoCAD install through the "
-        "headless core engine, but there is no write path, no mock-upstream contract "
-        "suite, and no recorded live smoke evidence."
+        "Read commands and one gated write command run against a real AutoCAD "
+        "install through the headless core engine, but there is no mock-upstream "
+        "contract suite and no recorded live smoke evidence."
     ),
     "required_evidence": [
         "functional_contract_coverage_100",
@@ -141,6 +149,25 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "shape": "object",
         "fields": ["layouts", "count", "paper_space_count"],
         "untrusted_fields": ["layouts"],
+    },
+    "layer_set": {
+        "shape": "object",
+        "fields": [
+            "layer",
+            "applied",
+            "changed",
+            "before",
+            "after",
+            "verification",
+            "backup",
+            "backup_note",
+        ],
+        "untrusted_fields": ["layer", "before", "after"],
+    },
+    "layer_set_preview": {
+        "shape": "object",
+        "fields": ["preview", "confirm_token", "expires_at"],
+        "untrusted_fields": ["preview"],
     },
     "xref_list": {
         "shape": "object",
@@ -313,6 +340,61 @@ COMMANDS: list[dict[str, Any]] = [
             f'{TOOL} xref list --file "C:/drawings/sheet.dwg" --fields missing --compact',
         ],
     },
+    {
+        "path": "layer set",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Change one layer's colour or its on/frozen/locked state. Requires "
+            "write permission enabled by a human in the config file, then "
+            "--dry-run to obtain a confirm token, then --confirm. The file is "
+            "backed up first and re-opened afterwards to verify what landed."
+        ),
+        "params": [
+            FILE_PARAM,
+            {
+                "name": "name",
+                "type": "string",
+                "required": True,
+                "multiple": False,
+                "description": "Layer to modify; it must already exist.",
+            },
+            {
+                "name": "color",
+                "type": "integer",
+                "required": False,
+                "multiple": False,
+                "description": "AutoCAD Color Index, 1..255.",
+            },
+            {
+                "name": "on|off",
+                "type": "boolean",
+                "required": False,
+                "multiple": False,
+                "description": "Turn the layer on or off (distinct from freezing).",
+            },
+            {
+                "name": "freeze|thaw",
+                "type": "boolean",
+                "required": False,
+                "multiple": False,
+                "description": "Freeze or thaw the layer.",
+            },
+            {
+                "name": "lock|unlock",
+                "type": "boolean",
+                "required": False,
+                "multiple": False,
+                "description": "Lock or unlock the layer.",
+            },
+        ],
+        "output_schema": "layer_set",
+        "examples": [
+            f'{TOOL} layer set --file "bracket.dwg" --name DIMS --color 3 --dry-run --compact',
+            f'{TOOL} layer set --file "bracket.dwg" --name DIMS --color 3'
+            " --confirm <confirm_token> --compact",
+        ],
+    },
 ]
 
 GLOBAL_FLAGS = [
@@ -406,6 +488,33 @@ def require_file(flags: list[str]) -> Path:
     if not target.is_file():
         raise autocad.EngineError("E_NOT_FOUND", "drawing file does not exist", file=str(target))
     return target
+
+
+def take_boolean(flags: list[str], flag: str) -> bool:
+    if flag in flags:
+        flags.remove(flag)
+        return True
+    return False
+
+
+def take_switch(flags: list[str], on_flag: str, off_flag: str) -> bool | None:
+    """A tri-state flag pair: True, False, or "leave it alone".
+
+    Passing both is a usage error rather than a silent precedence rule - an
+    agent that sends `--on --off` has a bug, and guessing which it meant would
+    hide it behind a write.
+    """
+    enabled = take_boolean(flags, on_flag)
+    disabled = take_boolean(flags, off_flag)
+    if enabled and disabled:
+        raise UsageError(
+            f"{on_flag} and {off_flag} are mutually exclusive", flags=[on_flag, off_flag]
+        )
+    if enabled:
+        return True
+    if disabled:
+        return False
+    return None
 
 
 def take_int(flags: list[str], flag: str) -> int | None:
@@ -528,9 +637,17 @@ def build_doctor() -> dict[str, Any]:
             else "restore .agent/SPEC_VERSION and re-sync the spec",
         },
         {
-            "check": "write_commands",
-            "status": "warn",
-            "fix": "no write path exists yet; every command is read-only",
+            # An agent should learn it cannot write when it plans the write,
+            # not after being refused mid-sequence.
+            "check": "write_permission",
+            "status": "pass" if confirm.permission() == "write" else "warn",
+            "fix": None
+            if confirm.permission() == "write"
+            else (
+                'writes are disabled; a human can set {"permission": "write"} in '
+                f"{confirm.config_file()}"
+            ),
+            "message": confirm.permission(),
         },
         {
             "check": "release_readiness",
@@ -595,6 +712,32 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         target = require_file(flags)
         reject_unknown(flags)
         return emit_ok(drawing.xrefs(target), options, timer)
+    if name == "layer set":
+        target = require_file(flags)
+        layer = take_value(flags, "--name")
+        if layer is None:
+            raise UsageError("--name is required", flag="--name")
+        colour = take_int(flags, "--color")
+        on = take_switch(flags, "--on", "--off")
+        frozen = take_switch(flags, "--freeze", "--thaw")
+        locked = take_switch(flags, "--lock", "--unlock")
+        dry_run = take_boolean(flags, "--dry-run")
+        token = take_value(flags, "--confirm")
+        reject_unknown(flags)
+        return emit_ok(
+            drawing.set_layer(
+                target,
+                layer,
+                color=colour,
+                on=on,
+                frozen=frozen,
+                locked=locked,
+                dry_run=dry_run,
+                confirm_token=token,
+            ),
+            options,
+            timer,
+        )
 
     if name == "reference":
         wanted = take_value(flags, "--command")

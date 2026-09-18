@@ -9,20 +9,26 @@ Two automation channels exist and this module owns the read-only one:
   `probe_com` lives in this module; actually driving a live session is an
   opt-in write path that does not exist yet.
 
-Four things about accoreconsole are load-bearing and were each found the hard
+Five things about accoreconsole are load-bearing and were each found the hard
 way on a real 2026 install:
 
 1. Its stdout is **UTF-16LE**, not UTF-8.
-2. Invoked without `/s <script>` it never exits - it silently creates a drawing
+2. Its script input is the **system codepage**, not UTF-8 (see `write_script`).
+3. Invoked without `/s <script>` it never exits - it silently creates a drawing
    from the default template and blocks on the `Command:` prompt forever.
-3. It echoes every script line back, prefixed by a *localised* "Command:", so
+4. It echoes every script line back, prefixed by a *localised* "Command:", so
    parsing stdout means parsing around translated text.
-4. AutoLISP `princ` prints its result twice (the output, then the returned
+5. AutoLISP `princ` prints its result twice (the output, then the returned
    string literal).
 
-(3) and (4) are why results come back through a side-channel file that the
-script writes, rather than by scraping stdout. (2) is why every call is bounded
+(4) and (5) are why results come back through a side-channel file that the
+script writes, rather than by scraping stdout. (3) is why every call is bounded
 by a timeout. (1) still matters for surfacing engine errors.
+
+The recurring shape: this engine answers a malformed request by *waiting*, not
+by failing. Nothing here may assume an error will announce itself, and
+`(command ...)` - which drives the localised, prompt-driven command line - is
+avoided entirely in favour of AutoLISP that cannot prompt.
 """
 
 from __future__ import annotations
@@ -331,6 +337,34 @@ def build_script(body: str, out_path: Path) -> str:
     )
 
 
+def write_script(path: Path, script: str) -> None:
+    """Write a .scr in the encoding the engine actually reads.
+
+    accoreconsole parses scripts in the **system codepage**, not UTF-8. Handing
+    it UTF-8 bytes for anything non-ASCII does not produce mojibake and carry on:
+    the misread bytes break the string literal, the parentheses never balance,
+    and the engine sits on its `((("_>` continuation prompt until the timeout
+    kills it. Verified on a zh-CN install - a UTF-8 script exited 124 where the
+    byte-identical GBK one exited 0.
+
+    This bites even when no command argument is non-ASCII, because the wrapper
+    embeds the temp output path - and `%TEMP%` contains the account name.
+    """
+    encoding = "mbcs" if os.name == "nt" else "utf-8"
+    try:
+        path.write_text(script, encoding=encoding, newline="\r\n")
+    except UnicodeEncodeError as error:
+        # Better a clear refusal than a script guaranteed to hang for `timeout`
+        # seconds and then report something vague.
+        raise EngineError(
+            "E_CONFIG",
+            "the script contains characters the system codepage cannot represent, "
+            "and the AutoCAD engine only reads scripts in that codepage",
+            encoding=encoding,
+            character=error.object[error.start : error.end],
+        ) from error
+
+
 def run_script(
     body: str,
     *,
@@ -363,7 +397,7 @@ def run_script(
         work = Path(workspace)
         out_path = work / "records.txt"
         script_path = work / "command.scr"
-        script_path.write_text(build_script(body, out_path), encoding="utf-8")
+        write_script(script_path, build_script(body, out_path))
 
         args = [str(engine)]
         if drawing is not None:

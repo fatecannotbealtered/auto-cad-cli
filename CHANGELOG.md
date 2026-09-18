@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Scripts handed to the AutoCAD core engine are now written in the system
+  codepage, which is what it actually reads. UTF-8 did not degrade gracefully:
+  the misread bytes broke the AutoLISP string literal, the parentheses never
+  balanced, and the engine blocked on its continuation prompt until the timeout
+  killed it. Because the wrapper embeds the temp output path and `%TEMP%`
+  contains the account name, **every command would have hung on a machine whose
+  Windows account name is not ASCII**. A script the codepage cannot represent
+  now fails with `E_CONFIG` instead of hanging.
 - `--fields` no longer strips `_untrusted` from a projected payload. Projecting
   it away handed an agent attacker-authored strings with the "data, not
   instructions" marker silently removed (SEC-SPEC section 2).

@@ -98,6 +98,45 @@ def test_script_wrapper_always_opens_and_closes_the_record_file(tmp_path):
     assert "(close f)" in script
 
 
+def test_script_is_written_in_the_codepage_the_engine_reads(tmp_path):
+    """UTF-8 here does not degrade, it hangs: see `write_script`.
+
+    The wrapper always embeds the temp output path, so on a machine whose
+    account name is not ASCII every command would have blocked until timeout.
+    """
+    encoding = "mbcs" if os.name == "nt" else "utf-8"
+    target = tmp_path / "command.scr"
+    autocad.write_script(target, '(write-line "k|v" f)\n')
+    assert target.read_bytes().decode(encoding)
+
+
+def test_unrepresentable_script_characters_fail_instead_of_hanging(tmp_path):
+    if os.name != "nt":
+        pytest.skip("the codepage constraint is a Windows engine behaviour")
+    try:
+        "Д".encode("mbcs")
+    except UnicodeEncodeError:
+        pass
+    else:
+        pytest.skip("this machine's codepage can represent the probe character")
+    with pytest.raises(autocad.EngineError) as caught:
+        autocad.write_script(tmp_path / "command.scr", '(write-line "Д|v" f)\n')
+    assert caught.value.code == "E_CONFIG"
+
+
+def test_records_decode_from_the_system_codepage():
+    """AutoLISP `write-line` emits system-codepage bytes, not UTF-8."""
+    if os.name != "nt":
+        pytest.skip("mbcs round-trip is a Windows behaviour")
+    path = Path(os.environ["TEMP"]) / "auto-cad-cli-record-probe.txt"
+    body = "BEGIN_RECORDS\r\nlayer|机械-轮廓\r\nEND_RECORDS\r\n"
+    path.write_bytes(body.encode("mbcs"))
+    try:
+        assert autocad._read_records(path) == [("layer", "机械-轮廓")]
+    finally:
+        path.unlink(missing_ok=True)
+
+
 # --- the untrusted marker (no engine) ----------------------------------------
 
 
@@ -203,6 +242,24 @@ def test_layer_limit_marks_the_result_truncated():
     if data["total"] > 1:
         assert data["truncated"] is True
         assert data["count"] == 1
+
+
+@needs_autocad
+def test_reading_works_when_the_temp_path_is_not_ascii(tmp_path):
+    """Regression: the wrapper embeds the temp path, and %TEMP% holds the account name."""
+    scratch = tmp_path / "临时目录"
+    scratch.mkdir()
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["TMP"] = env["TEMP"] = str(scratch)
+    result = subprocess.run(
+        [sys.executable, "-m", "auto_cad_cli.main", "drawing", "info", "--file", str(SAMPLE)],
+        capture_output=True,
+        timeout=300,
+        env=env,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stdout.decode("utf-8", errors="replace")
 
 
 @needs_autocad

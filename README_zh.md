@@ -23,7 +23,7 @@
 > 面向 AI Agent 的 Autodesk AutoCAD 图纸自动化 CLI。
 
 > [!WARNING]
-> **0.1.0 只有机器契约。** `reference`、`context`、`doctor`、`changelog` 可用；
+> **当前版本只有机器契约。** `reference`、`context`、`doctor`、`changelog` 可用；
 > **尚无任何 AutoCAD 命令**，也未发布到 npm。`reference` 报
 > `release_readiness.level: unpublishable`，`doctor` 的 `release_readiness` 检查
 > 故意为 fail。下文描述的是目标形态 —— 实际存在的命令集以 `reference` 为准。
@@ -55,7 +55,7 @@ PowerShell 使用 `$env:NAME = "value"` 设置同样的环境变量。真实密�
 
 `auto-cad-cli` 是 AI Agent 优先的 CLI。默认输出 JSON，实时命令面通过 `auto-cad-cli reference` 发现；支持写操作的命令使用非交互的 `--dry-run` 到 `--confirm <confirm_token>` 流程。
 
-最坏情况风险等级：**T1** - it writes drawing files and drives a licensed AutoCAD session on the operator's machine, with no account-level, financial or irreversible remote effects。参见 [SECURITY.md](SECURITY.md) 和 [.agent/SEC-SPEC.md](.agent/SEC-SPEC.md)。
+最坏情况风险等级：**T1** - 它会写入图纸文件并驱动操作者机器上已授权的 AutoCAD 会话，不涉及账号级、资金类或不可逆的远端效果。参见 [SECURITY.md](SECURITY.md) 和 [.agent/SEC-SPEC.md](.agent/SEC-SPEC.md)。
 
 ## 能力
 

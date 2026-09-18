@@ -1,10 +1,10 @@
 ---
 name: auto-cad-cli
-version: "0.1.0"
+version: "1.0.0"
 description: "Drives Autodesk AutoCAD from the command line for AI agents: drawing and layer inspection, entity queries and typed edits, block and attribute handling, layout setup, and DWG/DXF/PDF output. Use when the user asks to read, audit, edit, batch-process or export AutoCAD drawings, or mentions DWG, DXF, AutoCAD layers, blocks, attributes or layouts. JSON is the default; use --compact for token efficiency and read reference before task commands. Not for arbitrary AutoLISP/VBA execution, or the vertical object models of Civil 3D, Plant 3D or Inventor."
 license: MIT
 user-invocable: true
-metadata: {"requires":{"bins":["auto-cad-cli"],"min_version":"0.1.0"}}
+metadata: {"requires":{"bins":["auto-cad-cli"],"min_version":"1.0.0"}}
 ---
 
 <!--
@@ -23,7 +23,7 @@ Deterministic, machine-readable AutoCAD operations for AI agents: drawing and
 layer inspection, entity queries and typed edits, block and attribute handling,
 layout setup, and DWG/DXF/PDF output.
 
-> **Status at 0.1.0: the machine contract only.** `reference`, `context`,
+> **Status: the machine contract only.** `reference`, `context`,
 > `doctor` and `changelog` work; **no AutoCAD command exists yet**. `reference`
 > reports `release_readiness.level: unpublishable` and `doctor` fails its
 > `release_readiness` check, on purpose. Treat any AutoCAD capability described

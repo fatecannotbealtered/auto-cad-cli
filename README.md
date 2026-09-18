@@ -23,7 +23,7 @@
 > Agent-native CLI for Autodesk AutoCAD drawing automation.
 
 > [!WARNING]
-> **0.1.0 is the machine contract only.** `reference`, `context`, `doctor` and
+> **This release is the machine contract only.** `reference`, `context`, `doctor` and
 > `changelog` work; **no AutoCAD command exists yet** and nothing is published to
 > npm. `reference` reports `release_readiness.level: unpublishable` and `doctor`
 > fails its `release_readiness` check, by design. Everything below describes the

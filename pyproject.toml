@@ -4,8 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-cad-cli"
-version = "0.1.0"
-description = "AI-native Autodesk AutoCAD CLI - drawing and layer inspection, typed edits, block and attribute handling, and DWG/DXF/PDF output"
+# Derived, never hand-written: version-files.js does not know about pyproject.toml,
+# so a literal here would be a drift location check-version.js cannot guard.
+# Reading __version__ keeps package.json -> __init__.py -> here a single chain.
+dynamic = ["version"]
+description ="AI-native Autodesk AutoCAD CLI - drawing and layer inspection, typed edits, block and attribute handling, and DWG/DXF/PDF output"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -31,6 +34,9 @@ auto-cad-cli = "auto_cad_cli.main:main"
 [project.urls]
 Homepage = "https://github.com/fatecannotbealtered/auto-cad-cli"
 Changelog = "https://github.com/fatecannotbealtered/auto-cad-cli/blob/main/CHANGELOG.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "auto_cad_cli.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["auto_cad_cli*"]

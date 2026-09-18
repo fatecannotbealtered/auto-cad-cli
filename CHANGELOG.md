@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-18
+
 ### Added
 
 - Repository seeded from `ai-native-cli-spec` at the pinned tag `v1.6.2`: the
@@ -55,3 +57,6 @@ Keep the link references at the bottom of the file in sync.
 [Unreleased]: https://github.com/fatecannotbealtered/auto-cad-cli/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/fatecannotbealtered/auto-cad-cli/releases/tag/v0.1.0
 -->
+
+[Unreleased]: https://github.com/fatecannotbealtered/auto-cad-cli/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/fatecannotbealtered/auto-cad-cli/releases/tag/v1.0.0

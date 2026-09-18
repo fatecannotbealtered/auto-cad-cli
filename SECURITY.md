@@ -10,7 +10,7 @@ Security fixes are applied to the **latest minor release** on the default branch
 
 | Version | Supported |
 |---------|-----------|
-| latest `0.1.0` minor | Yes |
+| latest `1.0.0` minor | Yes |
 | older minors | No |
 
 ## Reporting a Vulnerability

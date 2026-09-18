@@ -1,6 +1,6 @@
 """Entry point: global flag parsing, dispatch, and the self-describing commands.
 
-AutoCAD capability is deliberately absent at 0.1.0. The contract is the
+AutoCAD capability is deliberately absent at this stage. The contract is the
 foundation the rest is built on (AGENT.md workflow A, step 2), so it ships and
 is testable before the first drawing command exists.
 """
@@ -144,7 +144,11 @@ COMMANDS: list[dict[str, Any]] = [
             }
         ],
         "output_schema": "changelog",
-        "examples": [f"{TOOL} changelog --compact", f"{TOOL} changelog --since 0.1.0 --compact"],
+        "examples": [
+            f"{TOOL} changelog --compact",
+            # Derived so the example stays runnable across bumps.
+            f"{TOOL} changelog --since {__version__} --compact",
+        ],
     },
 ]
 
@@ -289,7 +293,7 @@ def build_doctor() -> dict[str, Any]:
         {
             "check": "autocad_integration",
             "status": "warn",
-            "fix": "not implemented at 0.1.0; no drawing command exists yet",
+            "fix": f"not implemented at {__version__}; no drawing command exists yet",
         },
         {
             "check": "release_readiness",

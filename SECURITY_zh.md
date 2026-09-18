@@ -10,7 +10,7 @@
 
 | 版本 | 是否支持 |
 |------|----------|
-| 最新 `0.1.0` minor | 是 |
+| 最新 `1.0.0` minor | 是 |
 | 旧 minor | 否 |
 
 ## 报告漏洞
@@ -28,7 +28,7 @@
 
 ## 风险分级
 
-根据 [`.agent/SEC-SPEC_zh.md`](.agent/SEC-SPEC_zh.md)，`auto-cad-cli` 被定级为 **T1**：it writes drawing files and drives a licensed AutoCAD session on the operator's machine, with no account-level, financial or irreversible remote effects。
+根据 [`.agent/SEC-SPEC_zh.md`](.agent/SEC-SPEC_zh.md)，`auto-cad-cli` 被定级为 **T1**：它会写入图纸文件并驱动操作者机器上已授权的 AutoCAD 会话，不涉及账号级、资金类或不可逆的远端效果。
 
 分级标准（见 SEC-SPEC §1）：
 

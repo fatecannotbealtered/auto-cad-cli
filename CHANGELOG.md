@@ -9,9 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `drawing info --file <dwg>` and `layer list --file <dwg>`: the first read-only
-  capability, served by the headless AutoCAD core engine (`accoreconsole`) with
-  `/readonly`, so neither can disturb a drawing open in the GUI.
+- Five read-only commands, all served by the headless AutoCAD core engine
+  (`accoreconsole`) with `/readonly`, so none can disturb a drawing open in the
+  GUI: `drawing info`, `layer list`, `entity summary`, `block list` and
+  `text extract`.
+- `entity summary` aggregates counts inside AutoLISP rather than emitting one
+  record per object, so a 2400-object drawing returns a histogram, not a
+  transfer. It states its own scope: model and paper space, with block
+  definition contents not expanded.
+- `block list` reports how many times each definition is actually placed, plus
+  attribute and xref state. Zero insertions means an unused block, which is what
+  an audit is looking for.
+- `text extract` returns TEXT/MTEXT/ATTDEF strings with layer and insertion
+  point, keeping MTEXT inline formatting codes rather than guessing at them.
 - `doctor` now performs real environment checks: AutoCAD install discovery from
   the registry, `accoreconsole.exe` presence, and which versioned COM ProgID a
   live editor would be reached through.

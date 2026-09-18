@@ -23,8 +23,9 @@
 > 面向 AI Agent 的 Autodesk AutoCAD 图纸自动化 CLI。
 
 > [!WARNING]
-> **只读，且尚未发布到 npm。** `drawing info` 和 `layer list` 已能通过无头核心引擎
-> 读取真实 AutoCAD 图纸；**完全没有写入路径**。`reference` 报
+> **只读，且尚未发布到 npm。** 五条命令 —— `drawing info`、`layer list`、
+> `entity summary`、`block list`、`text extract` —— 已能通过无头核心引擎读取真实
+> AutoCAD 图纸；**完全没有写入路径**。`reference` 报
 > `release_readiness.level: unpublishable`，`doctor` 的 `release_readiness` 检查
 > 故意为 fail。下文凡是涉及写操作或已安装包的部分都是目标形态 —— 实际存在的命令集
 > 以 `reference` 为准。包发布前请从源码运行：
@@ -64,6 +65,9 @@ PowerShell 使用 `$env:NAME = "value"` 设置同样的环境变量。真实密�
 |------|------|------------|
 | 图纸 | `drawing info` | 单个文件的标识、单位、范围、布局与对象计数。 |
 | 图层 | `layer list` | 图层表，含颜色与 开/冻结/锁定 状态。 |
+| 实体 | `entity summary` | 按 DXF 类型的对象计数，覆盖模型空间与图纸空间。 |
+| 块 | `block list` | 块定义，含插入次数、属性与外部参照状态。 |
+| 文字 | `text extract` | TEXT/MTEXT/ATTDEF 内容，含图层与插入点。 |
 | 自描述 | `reference`, `context`, `doctor`, `changelog`, `update` | 用实时能力和版本变化引导 Agent。 |
 
 README 只做地图，不做完整手册。Agent 在执行任务命令前，应调用 `auto-cad-cli reference --compact` 获取准确的 flags、schemas、权限、退出码和错误码。

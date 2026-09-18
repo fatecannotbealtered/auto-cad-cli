@@ -23,8 +23,9 @@ Deterministic, machine-readable AutoCAD operations for AI agents: drawing and
 layer inspection, entity queries and typed edits, block and attribute handling,
 layout setup, and DWG/DXF/PDF output.
 
-> **Status: read-only.** `drawing info` and `layer list` read real drawings
-> through the headless core engine. There is **no write path**, so the Write
+> **Status: read-only.** `drawing info`, `layer list`, `entity summary`,
+> `block list` and `text extract` read real drawings through the headless core
+> engine. There is **no write path**, so the Write
 > Recipe below is the target shape, not something you can call today —
 > `--dry-run` and `--confirm` exist on no command. `reference` reports
 > `release_readiness.level: unpublishable`. Always enumerate the live command

@@ -185,11 +185,27 @@ def test_non_integer_limit_is_a_usage_error():
     assert envelope["error"]["details"]["flag"] == "--limit"
 
 
-def test_reference_declares_both_drawing_commands():
+DRAWING_COMMANDS = (
+    ("drawing", "info"),
+    ("layer", "list"),
+    ("entity", "summary"),
+    ("block", "list"),
+    ("text", "extract"),
+)
+
+
+@pytest.mark.parametrize("words", DRAWING_COMMANDS)
+def test_every_drawing_command_requires_a_file(words):
+    code, stdout = run(*words, "--compact")
+    assert code == 2
+    assert json.loads(stdout)["error"]["code"] == "E_USAGE"
+
+
+def test_reference_declares_every_drawing_command():
     code, stdout = run("reference", "--compact")
     assert code == 0
     paths = {c["path"] for c in json.loads(stdout)["data"]["commands"]}
-    assert {"drawing info", "layer list"} <= paths
+    assert {" ".join(w) for w in DRAWING_COMMANDS} <= paths
 
 
 def test_reference_marks_external_drawing_content_untrusted():
@@ -242,6 +258,62 @@ def test_layer_limit_marks_the_result_truncated():
     if data["total"] > 1:
         assert data["truncated"] is True
         assert data["count"] == 1
+
+
+@needs_autocad
+def test_entity_summary_counts_by_dxf_type():
+    code, stdout = run("entity", "summary", "--file", str(SAMPLE), "--compact")
+    assert code == 0, stdout
+    data = json.loads(stdout)["data"]
+    assert data["total"] == sum(data["by_type"].values())
+    assert data["distinct_types"] == len(data["by_type"])
+    # Descending count is what makes the histogram readable at a glance.
+    counts = list(data["by_type"].values())
+    assert counts == sorted(counts, reverse=True)
+
+
+@needs_autocad
+def test_block_list_reports_insert_counts_and_xref_state():
+    code, stdout = run("block", "list", "--file", str(SAMPLE), "--compact")
+    assert code == 0, stdout
+    data = json.loads(stdout)["data"]
+    assert data["xrefs"] == sum(1 for b in data["blocks"] if b["xref"])
+    for block in data["blocks"]:
+        assert set(block) == {
+            "name",
+            "inserts",
+            "anonymous",
+            "has_attributes",
+            "xref",
+            "xref_path",
+        }
+        assert block["inserts"] >= 0
+
+
+@needs_autocad
+def test_text_extract_returns_author_content_marked_untrusted():
+    code, stdout = run("text", "extract", "--file", str(SAMPLE), "--compact")
+    assert code == 0, stdout
+    data = json.loads(stdout)["data"]
+    assert data["_untrusted"] == ["items"]
+    for item in data["items"]:
+        assert item["type"] in {"TEXT", "MTEXT", "ATTDEF"}
+        assert isinstance(item["content"], str)
+
+
+@needs_autocad
+def test_an_empty_drawing_returns_empty_results_not_errors():
+    """A template has no entities; summing an empty AutoLISP list must not abort."""
+    install = autocad.preferred_install()
+    templates = sorted((install.location).rglob("acadiso.dwt")) if install else []
+    template = templates[0] if templates else None
+    if template is None:
+        pytest.skip("no acadiso.dwt under the install to use as an empty drawing")
+    code, stdout = run("entity", "summary", "--file", str(template), "--compact")
+    assert code == 0, stdout
+    data = json.loads(stdout)["data"]
+    assert data["total"] == 0
+    assert data["by_type"] == {}
 
 
 @needs_autocad

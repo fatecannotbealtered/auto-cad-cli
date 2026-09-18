@@ -67,6 +67,67 @@ _INFO_BODY = """
 (write-line (strcat "blocks|" (itoa n)) f)
 """
 
+# Counts are accumulated inside AutoLISP rather than emitted per entity: a real
+# drawing holds tens of thousands of objects, and one record each would turn a
+# summary into a transfer.
+_ENTITY_BODY = """
+(setq counts '())
+(setq e (entnext))
+(while e
+  (setq ty (cdr (assoc 0 (entget e))))
+  (setq hit (assoc ty counts))
+  (if hit
+    (setq counts (subst (cons ty (1+ (cdr hit))) hit counts))
+    (setq counts (cons (cons ty 1) counts)))
+  (setq e (entnext e)))
+(foreach c counts
+  (write-line (strcat "entity|" (car c) "\\t" (itoa (cdr c))) f))
+(write-line (strcat "scanned|" (itoa (apply '+ (mapcar 'cdr counts)))) f)
+"""
+
+# Block definitions plus how many times each is actually placed. An xref is a
+# block record carrying group 1 (the referenced path).
+_BLOCK_BODY = """
+(setq uses '())
+(setq e (entnext))
+(while e
+  (setq d (entget e))
+  (if (= (cdr (assoc 0 d)) "INSERT")
+    (progn
+      (setq nm (cdr (assoc 2 d)) hit (assoc nm uses))
+      (if hit
+        (setq uses (subst (cons nm (1+ (cdr hit))) hit uses))
+        (setq uses (cons (cons nm 1) uses)))))
+  (setq e (entnext e)))
+(setq b (tblnext "BLOCK" T))
+(while b
+  (setq nm (cdr (assoc 2 b)) hit (assoc nm uses))
+  (write-line
+    (strcat "block|" nm
+            "\\t" (itoa (cdr (assoc 70 b)))
+            "\\t" (itoa (if hit (cdr hit) 0))
+            "\\t" (if (assoc 1 b) (cdr (assoc 1 b)) ""))
+    f)
+  (setq b (tblnext "BLOCK")))
+"""
+
+# Text content is written last on the record so a tab inside it cannot shift the
+# preceding fields.
+_TEXT_BODY = """
+(setq e (entnext))
+(while e
+  (setq d (entget e) ty (cdr (assoc 0 d)))
+  (if (member ty '("TEXT" "MTEXT" "ATTDEF"))
+    (write-line
+      (strcat "text|" ty
+              "\\t" (cdr (assoc 8 d))
+              "\\t" (rtos (car (cdr (assoc 10 d))) 2 4)
+              "," (rtos (cadr (cdr (assoc 10 d))) 2 4)
+              "\\t" (if (assoc 1 d) (cdr (assoc 1 d)) ""))
+      f))
+  (setq e (entnext e)))
+"""
+
 # Emits one record per layer; fields are tab-separated because a layer name may
 # legally contain almost anything except a tab.
 _LAYER_BODY = """
@@ -218,5 +279,134 @@ def layers(drawing: Path, limit: int | None = None, timeout: float | None = None
     }
     if truncated:
         # Never hand back a short list that looks complete (CLI-SPEC section 8).
+        data["truncated"] = True
+    return data
+
+
+# DXF group 70 on a BLOCK table record.
+_ANONYMOUS_BIT = 1
+_HAS_ATTRIBUTES_BIT = 2
+_XREF_BIT = 4
+_XREF_OVERLAY_BIT = 8
+
+
+def entities(drawing: Path, timeout: float | None = None) -> dict[str, Any]:
+    """How many objects of each DXF type the drawing holds.
+
+    Walks `entnext`, which covers model and paper space but not the contents of
+    block *definitions* - so a block placed once counts as one INSERT, not as
+    its constituent geometry. `reference` says so; an agent sizing a drawing
+    needs to know which of the two it is being told.
+    """
+    records = autocad.run_script(_ENTITY_BODY, drawing=drawing, readonly=True, timeout=timeout)
+    by_type: dict[str, int] = {}
+    for key, value in records:
+        if key != "entity":
+            continue
+        name, _, count = value.partition("\t")
+        by_type[name] = _as_int(count)
+
+    scanned = _first(records, "scanned")
+    if scanned is None:
+        raise autocad.EngineError(
+            "E_SERVER",
+            "the entity scan did not report a total",
+            reported=sorted({name for name, _ in records}),
+        )
+    return {
+        "by_type": dict(sorted(by_type.items(), key=lambda item: (-item[1], item[0]))),
+        "distinct_types": len(by_type),
+        "total": _as_int(scanned),
+        "scope": "model and paper space; block definition contents are not expanded",
+    }
+
+
+def blocks(drawing: Path, limit: int | None = None, timeout: float | None = None) -> dict[str, Any]:
+    """Block definitions with how many times each is actually placed.
+
+    A definition with zero insertions is not an error - it is an unused block,
+    which is exactly what someone auditing a drawing is looking for.
+    """
+    records = autocad.run_script(_BLOCK_BODY, drawing=drawing, readonly=True, timeout=timeout)
+
+    parsed: list[dict[str, Any]] = []
+    for key, value in records:
+        if key != "block":
+            continue
+        fields = value.split("\t")
+        name = fields[0] if fields else ""
+        flags = _as_int(fields[1]) if len(fields) > 1 else 0
+        inserts = _as_int(fields[2]) if len(fields) > 2 else 0
+        path = fields[3] if len(fields) > 3 else ""
+        parsed.append(
+            {
+                "name": name,
+                "inserts": inserts,
+                "anonymous": bool(flags & _ANONYMOUS_BIT),
+                "has_attributes": bool(flags & _HAS_ATTRIBUTES_BIT),
+                "xref": bool(flags & (_XREF_BIT | _XREF_OVERLAY_BIT)),
+                "xref_path": path or None,
+            }
+        )
+
+    total = len(parsed)
+    truncated = limit is not None and 0 <= limit < total
+    if truncated:
+        parsed = parsed[:limit]
+
+    data: dict[str, Any] = {
+        "blocks": parsed,
+        "count": len(parsed),
+        "total": total,
+        "xrefs": sum(1 for b in parsed if b["xref"]),
+        "_untrusted": ["blocks"],
+    }
+    if truncated:
+        data["truncated"] = True
+    return data
+
+
+def text(drawing: Path, limit: int | None = None, timeout: float | None = None) -> dict[str, Any]:
+    """Every TEXT, MTEXT and ATTDEF string, with its layer and insertion point.
+
+    This is the most attacker-reachable payload the tool returns: an agent
+    reading a title block is reading whatever the drawing's author typed. It is
+    reported under `_untrusted` and must never be treated as instruction.
+
+    MTEXT content still carries its inline formatting codes (`\\P`, `{\\f...}`);
+    stripping them would be lossy guesswork, so the raw string is returned.
+    """
+    records = autocad.run_script(_TEXT_BODY, drawing=drawing, readonly=True, timeout=timeout)
+
+    parsed: list[dict[str, Any]] = []
+    for key, value in records:
+        if key != "text":
+            continue
+        # Content is last and may itself contain tabs, so split only the head.
+        fields = value.split("\t", 3)
+        if len(fields) < 4:
+            continue
+        kind, layer, position, content = fields
+        parsed.append(
+            {
+                "type": kind,
+                "layer": layer,
+                "position": _as_point(position + ",0") if position.count(",") == 1 else None,
+                "content": content,
+            }
+        )
+
+    total = len(parsed)
+    truncated = limit is not None and 0 <= limit < total
+    if truncated:
+        parsed = parsed[:limit]
+
+    data: dict[str, Any] = {
+        "items": parsed,
+        "count": len(parsed),
+        "total": total,
+        "_untrusted": ["items"],
+    }
+    if truncated:
         data["truncated"] = True
     return data

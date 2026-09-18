@@ -203,6 +203,8 @@ DRAWING_COMMANDS = (
     ("entity", "summary"),
     ("block", "list"),
     ("text", "extract"),
+    ("layout", "list"),
+    ("xref", "list"),
 )
 
 
@@ -326,6 +328,99 @@ def test_an_empty_drawing_returns_empty_results_not_errors():
     data = json.loads(stdout)["data"]
     assert data["total"] == 0
     assert data["by_type"] == {}
+
+
+def _drawing_with_xrefs() -> Path | None:
+    """A shipped sample that actually references other drawings.
+
+    Sheet-set samples are the ones that do; picking by name keeps this to a
+    couple of candidates instead of a three-second engine run per sample.
+    """
+    install = autocad.preferred_install()
+    if install is None or install.accoreconsole is None:
+        return None
+    sample_root = install.location / "Sample"
+    for pattern in ("**/S-0*.dwg", "**/A-0*.dwg", "**/*Site*Plan.dwg"):
+        for candidate in sorted(sample_root.glob(pattern)):
+            return candidate
+    return None
+
+
+XREF_SAMPLE = _drawing_with_xrefs()
+needs_xref_sample = pytest.mark.skipif(
+    XREF_SAMPLE is None, reason="no shipped sample drawing that uses xrefs"
+)
+
+
+@needs_autocad
+def test_layout_list_reports_sheet_size_and_flags_model():
+    code, stdout = run("layout", "list", "--file", str(SAMPLE), "--compact")
+    assert code == 0, stdout
+    data = json.loads(stdout)["data"]
+    assert data["count"] == len(data["layouts"])
+    assert data["paper_space_count"] == sum(1 for item in data["layouts"] if not item["is_model"])
+    # Model always exists and must be visible rather than quietly dropped.
+    assert any(item["is_model"] for item in data["layouts"])
+    for item in data["layouts"]:
+        assert item["paper"]["width_mm"] >= 0
+        # A fit-to-paper layout has no meaningful ratio to report.
+        if item["plot"]["fit_to_paper"]:
+            assert item["plot"]["scale_numerator"] is None
+
+
+@needs_autocad
+@needs_xref_sample
+def test_xref_list_resolves_references_that_are_present():
+    code, stdout = run("xref", "list", "--file", str(XREF_SAMPLE), "--compact")
+    assert code == 0, stdout
+    data = json.loads(stdout)["data"]
+    if data["count"] == 0:
+        pytest.skip(f"{XREF_SAMPLE.name} turned out to have no xrefs")
+    assert data["missing_count"] == 0, data["missing"]
+    for item in data["xrefs"]:
+        assert item["file_found"] is True
+        assert item["resolved_path"]
+
+
+@needs_autocad
+@needs_xref_sample
+def test_xref_list_reports_a_broken_link_when_the_target_is_gone(tmp_path):
+    """The whole point: a DWG happily names a path that no longer exists."""
+    orphan = tmp_path / "orphan.dwg"
+    orphan.write_bytes(XREF_SAMPLE.read_bytes())
+    code, stdout = run("xref", "list", "--file", str(orphan), "--compact")
+    assert code == 0, stdout
+    data = json.loads(stdout)["data"]
+    if data["count"] == 0:
+        pytest.skip(f"{XREF_SAMPLE.name} turned out to have no xrefs")
+    assert data["missing_count"] == data["count"]
+    assert all(item["file_found"] is False for item in data["xrefs"])
+
+
+def test_xref_disk_check_resolves_relative_paths_against_the_host(tmp_path, monkeypatch):
+    """No engine: proves the path arithmetic, which is where a link breaks."""
+    host = tmp_path / "sheets" / "host.dwg"
+    host.parent.mkdir()
+    host.write_bytes(b"not really a drawing")
+    referenced = tmp_path / "sheets" / "Res" / "child.dwg"
+    referenced.parent.mkdir()
+    referenced.write_bytes(b"not really a drawing either")
+
+    monkeypatch.setattr(
+        autocad,
+        "run_script",
+        lambda *a, **k: [
+            ("xref", "Child\t36\t.\\Res\\child.dwg"),
+            ("xref", "Gone\t4\t.\\Res\\missing.dwg"),
+        ],
+    )
+    data = drawing.xrefs(host)
+    assert data["count"] == 2
+    assert data["missing"] == ["Gone"]
+    present = data["xrefs"][0]
+    assert present["file_found"] is True
+    assert present["loaded"] is True
+    assert Path(present["resolved_path"]) == referenced
 
 
 @needs_autocad

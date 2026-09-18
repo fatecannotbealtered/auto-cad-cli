@@ -33,6 +33,8 @@ Commands (all read-only; the drawing is opened /readonly in a headless engine):
   entity summary --file <dwg>    Object counts by DXF type
   block list --file <dwg>        Block definitions, insert counts, xrefs
   text extract --file <dwg>      TEXT/MTEXT/ATTDEF strings with layer and position
+  layout list --file <dwg>       Sheets with paper size, plot device and scale
+  xref list --file <dwg>         External references and whether their files exist
 
   reference [--command <path>]   Declared capabilities, schemas and error codes
   context                        Runtime environment, configuration, credentials
@@ -134,6 +136,16 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "shape": "object",
         "fields": ["items", "count", "total", "truncated"],
         "untrusted_fields": ["items"],
+    },
+    "layout_list": {
+        "shape": "object",
+        "fields": ["layouts", "count", "paper_space_count"],
+        "untrusted_fields": ["layouts"],
+    },
+    "xref_list": {
+        "shape": "object",
+        "fields": ["xrefs", "count", "missing_count", "missing"],
+        "untrusted_fields": ["xrefs", "missing"],
     },
 }
 
@@ -271,6 +283,34 @@ COMMANDS: list[dict[str, Any]] = [
         "examples": [
             f'{TOOL} text extract --file "C:/drawings/bracket.dwg" --compact',
             f'{TOOL} text extract --file "C:/drawings/bracket.dwg" --limit 50 --compact',
+        ],
+    },
+    {
+        "path": "layout list",
+        "type": "read",
+        "description": (
+            "Paper-space layouts with sheet size, plot device and plot scale. "
+            "Model is included and flagged rather than filtered out, so a count "
+            "of sheets is never silently off by one."
+        ),
+        "params": [FILE_PARAM],
+        "output_schema": "layout_list",
+        "examples": [f'{TOOL} layout list --file "C:/drawings/sheet.dwg" --compact'],
+    },
+    {
+        "path": "xref list",
+        "type": "read",
+        "description": (
+            "External references, whether AutoCAD resolved each one, and whether "
+            "the referenced file is actually on disk. Relative paths resolve "
+            "against the host drawing's directory. Use it to find broken links "
+            "in a delivered drawing set."
+        ),
+        "params": [FILE_PARAM],
+        "output_schema": "xref_list",
+        "examples": [
+            f'{TOOL} xref list --file "C:/drawings/sheet.dwg" --compact',
+            f'{TOOL} xref list --file "C:/drawings/sheet.dwg" --fields missing --compact',
         ],
     },
 ]
@@ -547,6 +587,14 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         limit = take_int(flags, "--limit")
         reject_unknown(flags)
         return emit_ok(drawing.text(target, limit=limit), options, timer)
+    if name == "layout list":
+        target = require_file(flags)
+        reject_unknown(flags)
+        return emit_ok(drawing.layouts(target), options, timer)
+    if name == "xref list":
+        target = require_file(flags)
+        reject_unknown(flags)
+        return emit_ok(drawing.xrefs(target), options, timer)
 
     if name == "reference":
         wanted = take_value(flags, "--command")

@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Five read-only commands, all served by the headless AutoCAD core engine
+- Seven read-only commands, all served by the headless AutoCAD core engine
   (`accoreconsole`) with `/readonly`, so none can disturb a drawing open in the
-  GUI: `drawing info`, `layer list`, `entity summary`, `block list` and
-  `text extract`.
+  GUI: `drawing info`, `layer list`, `entity summary`, `block list`,
+  `text extract`, `layout list` and `xref list`. Exercised across all 96
+  drawings shipped with AutoCAD 2026 with no engine failure and no run over
+  eight seconds.
 - `entity summary` aggregates counts inside AutoLISP rather than emitting one
   record per object, so a 2400-object drawing returns a histogram, not a
   transfer. It states its own scope: model and paper space, with block
@@ -22,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an audit is looking for.
 - `text extract` returns TEXT/MTEXT/ATTDEF strings with layer and insertion
   point, keeping MTEXT inline formatting codes rather than guessing at them.
+- `layout list` reports each sheet's paper size, plot device and plot scale.
+  Model is included and flagged rather than filtered out, so a sheet count is
+  never silently off by one.
+- `xref list` reports external references, whether AutoCAD resolved each one,
+  and whether the referenced file is actually on disk. Relative paths resolve
+  against the host drawing's directory.
 - `doctor` now performs real environment checks: AutoCAD install discovery from
   the registry, `accoreconsole.exe` presence, and which versioned COM ProgID a
   live editor would be reached through.

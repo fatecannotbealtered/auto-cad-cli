@@ -128,6 +128,47 @@ _TEXT_BODY = """
   (setq e (entnext e)))
 """
 
+# A layout object carries AcDbPlotSettings and AcDbLayout concatenated, so group
+# 1 appears twice - first the (often empty) page setup name, then the layout
+# name. `assoc` would return the wrong one, so the name comes from the
+# dictionary key instead.
+_LAYOUT_BODY = """
+(defun g (code lst dflt)
+  (if (assoc code lst) (cdr (assoc code lst)) dflt))
+(setq d (dictsearch (namedobjdict) "ACAD_LAYOUT"))
+(setq nm nil)
+(foreach pair d
+  (cond
+    ((= (car pair) 3) (setq nm (cdr pair)))
+    ((= (car pair) 350)
+      (setq L (entget (cdr pair)))
+      (write-line
+        (strcat "layout|" nm
+                "\\t" (itoa (g 71 L 0))
+                "\\t" (g 2 L "")
+                "\\t" (g 4 L "")
+                "\\t" (rtos (g 44 L 0.0) 2 3)
+                "\\t" (rtos (g 45 L 0.0) 2 3)
+                "\\t" (rtos (g 142 L 0.0) 2 6)
+                "\\t" (rtos (g 143 L 0.0) 2 6)
+                "\\t" (itoa (g 75 L 0)))
+        f))))
+"""
+
+# xref state lives in the BLOCK table record's flags; whether the referenced
+# file is actually there is a filesystem question answered on the Python side.
+_XREF_BODY = """
+(setq b (tblnext "BLOCK" T))
+(while b
+  (if (assoc 1 b)
+    (write-line
+      (strcat "xref|" (cdr (assoc 2 b))
+              "\\t" (itoa (cdr (assoc 70 b)))
+              "\\t" (cdr (assoc 1 b)))
+      f))
+  (setq b (tblnext "BLOCK")))
+"""
+
 # Emits one record per layer; fields are tab-separated because a layer name may
 # legally contain almost anything except a tab.
 _LAYER_BODY = """
@@ -364,6 +405,114 @@ def blocks(drawing: Path, limit: int | None = None, timeout: float | None = None
     if truncated:
         data["truncated"] = True
     return data
+
+
+def _as_float(value: str, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# DXF 75 on AcDbPlotSettings: 0 means "scaled to fit", anything else is a
+# standard scale, in which case 142/143 carry the real ratio.
+_SCALE_FIT = 0
+
+
+def layouts(drawing: Path, timeout: float | None = None) -> dict[str, Any]:
+    """Paper-space layouts with their sheet size and plot scale.
+
+    `Model` is included and flagged rather than filtered out: an agent asking
+    "what sheets are in here" needs to see that the model tab was counted and
+    excluded, not silently wonder where it went.
+    """
+    records = autocad.run_script(_LAYOUT_BODY, drawing=drawing, readonly=True, timeout=timeout)
+
+    parsed: list[dict[str, Any]] = []
+    for key, value in records:
+        if key != "layout":
+            continue
+        fields = value.split("\t")
+        if len(fields) < 9:
+            continue
+        name, tab, device, media, width, height, numerator, denominator, scale_type = fields[:9]
+        fit = _as_int(scale_type) == _SCALE_FIT
+        parsed.append(
+            {
+                "name": name,
+                "is_model": name.lower() == "model",
+                "tab_order": _as_int(tab),
+                "paper": {
+                    "media": media or None,
+                    # AcDbPlotSettings always stores the sheet in millimetres.
+                    "width_mm": _as_float(width),
+                    "height_mm": _as_float(height),
+                },
+                "plot": {
+                    "device": device or None,
+                    "fit_to_paper": fit,
+                    "scale_numerator": None if fit else _as_float(numerator),
+                    "scale_denominator": None if fit else _as_float(denominator),
+                },
+            }
+        )
+
+    parsed.sort(key=lambda item: item["tab_order"])
+    return {
+        "layouts": parsed,
+        "count": len(parsed),
+        "paper_space_count": sum(1 for item in parsed if not item["is_model"]),
+        "_untrusted": ["layouts"],
+    }
+
+
+# DXF 70 on a BLOCK record, xref-specific bits.
+_XREF_RESOLVED_BIT = 32
+
+
+def xrefs(drawing: Path, timeout: float | None = None) -> dict[str, Any]:
+    """External references, and whether each one's file is actually there.
+
+    A broken xref is the most common real defect in a delivered drawing set, and
+    it is invisible from inside the DWG alone - the block record happily names a
+    path that no longer exists. Relative paths are resolved against the host
+    drawing's own directory, which is how AutoCAD resolves them.
+    """
+    records = autocad.run_script(_XREF_BODY, drawing=drawing, readonly=True, timeout=timeout)
+    host_directory = drawing.parent
+
+    parsed: list[dict[str, Any]] = []
+    for key, value in records:
+        if key != "xref":
+            continue
+        fields = value.split("\t", 2)
+        if len(fields) < 3:
+            continue
+        name, flags_text, path = fields
+        flags = _as_int(flags_text)
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = host_directory / candidate
+        found = candidate.is_file()
+        parsed.append(
+            {
+                "name": name,
+                "path": path,
+                "resolved_path": str(candidate) if found else None,
+                "overlay": bool(flags & _XREF_OVERLAY_BIT),
+                "loaded": bool(flags & _XREF_RESOLVED_BIT),
+                "file_found": found,
+            }
+        )
+
+    missing = [item["name"] for item in parsed if not item["file_found"]]
+    return {
+        "xrefs": parsed,
+        "count": len(parsed),
+        "missing_count": len(missing),
+        "missing": missing,
+        "_untrusted": ["xrefs", "missing"],
+    }
 
 
 def text(drawing: Path, limit: int | None = None, timeout: float | None = None) -> dict[str, Any]:

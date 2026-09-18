@@ -23,10 +23,10 @@
 > Agent-native CLI for Autodesk AutoCAD drawing automation.
 
 > [!WARNING]
-> **Read-only, and not published to npm yet.** Five commands — `drawing info`,
-> `layer list`, `entity summary`, `block list`, `text extract` — work against a
-> real AutoCAD install through the headless core engine; there is **no write
-> path at all**. `reference` reports
+> **Read-only, and not published to npm yet.** Seven commands — `drawing info`,
+> `layer list`, `entity summary`, `block list`, `text extract`, `layout list`,
+> `xref list` — work against a real AutoCAD install through the headless core
+> engine; there is **no write path at all**. `reference` reports
 > `release_readiness.level: unpublishable` and `doctor` fails its
 > `release_readiness` check, by design. Everything below that implies writes or
 > an installed package describes the target shape — run `reference` for the
@@ -70,6 +70,8 @@ Worst-case risk tier: **T1** - it writes drawing files and drives a licensed Aut
 | Entities | `entity summary` | Object counts by DXF type, model and paper space. |
 | Blocks | `block list` | Definitions with insert counts, attribute and xref state. |
 | Text | `text extract` | TEXT/MTEXT/ATTDEF strings with layer and position. |
+| Sheets | `layout list` | Layouts with paper size, plot device and scale. |
+| Xrefs | `xref list` | External references and whether their files exist. |
 | Self-description | `reference`, `context`, `doctor`, `changelog`, `update` | Bootstrap an Agent with live capabilities and version deltas. |
 
 The README is intentionally a map, not the full manual. Agents should call `auto-cad-cli reference --compact` for exact flags, schemas, permissions, exit codes, and error codes before executing task commands.

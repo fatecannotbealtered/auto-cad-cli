@@ -691,3 +691,25 @@ def test_export_writes_a_dxf_without_touching_the_source(writable, tmp_path):
     assert confirm.file_digest(work) == before
     # The file is where it was asked for, not where a mangled path would put it.
     assert destination.is_file()
+
+
+def test_unrepresentable_symbol_suggests_the_autocad_control_code(tmp_path):
+    """A diameter symbol is unwritable as a literal on a CJK codepage.
+
+    It is also the single most common symbol in a mechanical drawing, so the
+    refusal points at `%%c` rather than leaving the caller stuck.
+    """
+    if os.name != "nt":
+        pytest.skip("the codepage constraint is a Windows engine behaviour")
+    try:
+        "Ø".encode("mbcs")
+    except UnicodeEncodeError:
+        pass
+    else:
+        pytest.skip("this machine's codepage can encode the diameter symbol")
+
+    with pytest.raises(autocad.EngineError) as caught:
+        autocad.write_script(tmp_path / "command.scr", '(write-line "4xØ10" f)\n')
+    assert caught.value.code == "E_CONFIG"
+    assert caught.value.details["character"] == "Ø"
+    assert "%%c" in caught.value.details["hint"]

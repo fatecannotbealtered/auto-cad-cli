@@ -51,6 +51,18 @@ DEFAULT_TIMEOUT = 180.0
 _BEGIN = "BEGIN_RECORDS"
 _END = "END_RECORDS"
 
+# AutoCAD's own escapes for symbols a drawing needs constantly. They matter
+# because they are ASCII: a Chinese codepage cannot encode U+00D8, so the
+# diameter symbol is unwritable as a literal but trivial as `%%c`. Offered in
+# the error rather than substituted silently - changing what someone asked to
+# write into a drawing is not this layer's call.
+CONTROL_CODES = {
+    "Ø": "%%c",  # diameter
+    "⌀": "%%c",  # diameter sign
+    "±": "%%p",  # plus-minus
+    "°": "%%d",  # degree
+}
+
 
 class EngineError(Exception):
     """A failure to obtain a result from the AutoCAD core engine.
@@ -337,6 +349,14 @@ def build_script(body: str, out_path: Path) -> str:
     )
 
 
+def _encodable(char: str, encoding: str) -> bool:
+    try:
+        char.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
 def write_script(path: Path, script: str) -> None:
     """Write a .scr in the encoding the engine actually reads.
 
@@ -356,12 +376,24 @@ def write_script(path: Path, script: str) -> None:
     except UnicodeEncodeError as error:
         # Better a clear refusal than a script guaranteed to hang for `timeout`
         # seconds and then report something vague.
+        # The offsets on an error raised through the file-writing layer are not
+        # reliable, so the offending character is found rather than sliced out.
+        offending = next(
+            (char for char in script if not _encodable(char, encoding)),
+            error.object[error.start : error.end],
+        )
+        details: dict[str, object] = {"encoding": encoding, "character": offending}
+        substitute = CONTROL_CODES.get(offending)
+        if substitute:
+            details["hint"] = (
+                f"AutoCAD writes this symbol as the control code {substitute!r}, "
+                "which is ASCII and survives any codepage"
+            )
         raise EngineError(
             "E_CONFIG",
             "the script contains characters the system codepage cannot represent, "
             "and the AutoCAD engine only reads scripts in that codepage",
-            encoding=encoding,
-            character=error.object[error.start : error.end],
+            **details,
         ) from error
 
 

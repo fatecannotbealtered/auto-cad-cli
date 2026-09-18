@@ -65,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layer 0, the current layer and any layer holding objects cannot be deleted -
   because AutoCAD's own delete reports refusal and success identically.
 
+- When a script cannot be encoded for the engine, the error now names the
+  AutoCAD control code for the symbol where one exists (`%%c` for ⌀, `%%p` for
+  ±, `%%d` for °). A Chinese codepage cannot encode U+00D8 at all, which makes
+  the most common symbol in a mechanical drawing unwritable as a literal.
 - `export dxf`: write the drawing out as DXF, 2018 back to R12. The source is
   opened `/readonly` so an export physically cannot alter it, and the result
   reports the source digest before and after rather than asserting it. Refuses

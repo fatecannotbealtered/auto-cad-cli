@@ -106,6 +106,11 @@ new file and never touches the source, but it still needs write permission
 because it writes to the operator's filesystem. There is no PDF export. Every other command opens the drawing `/readonly` in a separate
 headless process and cannot modify anything.
 
+Symbols in text: write `%%c` for ⌀, `%%p` for ±, `%%d` for °. These are
+AutoCAD's own control codes and they are ASCII, so they survive any system
+codepage — a literal `Ø` cannot be written at all on a Chinese Windows install
+and comes back as `E_CONFIG`.
+
 To draw: create the layer first (`draw` refuses an unknown layer), then add
 geometry to it. Repeatable tuple flags are **not** comma-separated lists —
 `--segments 0,0,120,0 --segments 120,0,120,80` is two segments, whereas

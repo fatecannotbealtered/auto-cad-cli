@@ -462,3 +462,99 @@ def test_new_writes_are_refused_without_permission(state, target, command):
     )
     assert code == 4
     assert json.loads(stdout)["error"]["code"] == "E_FORBIDDEN"
+
+
+# --- geometry -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "raw", "message"),
+    [
+        ("line", "0,0,10", "4 comma-separated"),
+        ("line", "a,b,c,d", "must be numbers"),
+        ("line", "5,5,5,5", "two different endpoints"),
+        ("circle", "0,0", "3 comma-separated"),
+        ("circle", "0,0,0", "positive radius"),
+        ("circle", "0,0,-4", "positive radius"),
+    ],
+)
+def test_malformed_geometry_is_rejected_before_the_engine(kind, raw, message):
+    """A bad number reaching AutoLISP is a silent no-op at best."""
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.parse_shapes(kind, [raw])
+    assert caught.value.code == "E_VALIDATION"
+    assert message in caught.value.message
+
+
+@needs_autocad
+def test_draw_refuses_a_layer_that_does_not_exist(writable, tmp_path):
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.draw(
+            work,
+            "line",
+            drawing.parse_shapes("line", ["0,0,10,10"]),
+            layer="nowhere",
+            dry_run=True,
+        )
+    assert caught.value.code == "E_NOT_FOUND"
+
+
+@needs_autocad
+def test_draw_line_adds_geometry_and_counts_it_back(writable, tmp_path):
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    shapes = drawing.parse_shapes("line", ["0,0,120,0", "120,0,120,80", "120,80,0,0"])
+
+    preview = drawing.draw(work, "line", shapes, layer="0", dry_run=True)
+    assert preview["preview"]["total"] == 3
+    assert preview["preview"]["changes"][0]["after"]["x2"] == 120.0
+
+    applied = drawing.draw(work, "line", shapes, layer="0", confirm_token=preview["confirm_token"])
+    assert applied["summary"] == {"total": 3, "succeeded": 3, "failed": 0}
+    check = applied["verification"]
+    # Counting is weaker than identifying each object, and the payload says so.
+    assert check["level"] == "reopened-and-counted"
+    assert check["after"] - check["before"] == 3
+    assert check["matches"] is True
+
+
+@needs_autocad
+def test_draw_circle_lands_on_the_named_layer(writable, tmp_path):
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    layer = "AUTO-CAD-CLI-HOLES"
+    created = drawing.create_layers(work, [layer], dry_run=True)
+    drawing.create_layers(work, [layer], confirm_token=created["confirm_token"])
+
+    shapes = drawing.parse_shapes("circle", ["20,20,6", "100,20,6"])
+    preview = drawing.draw(work, "circle", shapes, layer=layer, dry_run=True)
+    applied = drawing.draw(
+        work, "circle", shapes, layer=layer, confirm_token=preview["confirm_token"]
+    )
+    assert applied["summary"]["succeeded"] == 2
+    assert applied["layer"] == layer
+    assert applied["verification"]["matches"] is True
+
+
+@needs_autocad
+def test_draw_needs_a_token_like_every_other_write(writable, tmp_path):
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.draw(work, "line", drawing.parse_shapes("line", ["0,0,1,1"]), layer="0")
+    assert caught.value.code == "E_CONFIRMATION_REQUIRED"
+
+
+def test_repeated_tuple_flags_are_not_split_on_commas():
+    """`--names a,b` separates items; `--segments x,y,x,y` does not.
+
+    Collecting the second the way the first is collected turned one segment into
+    four unusable fragments, and only an end-to-end run caught it.
+    """
+    from auto_cad_cli.main import take_list, take_repeated
+
+    flags = ["--segments", "0,0,120,0", "--segments", "120,0,120,80"]
+    assert take_repeated(list(flags), "--segments") == ["0,0,120,0", "120,0,120,80"]
+    assert take_list(list(flags), "--segments") == ["0", "0", "120", "0", "120", "0", "120", "80"]

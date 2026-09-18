@@ -45,6 +45,8 @@ Write commands (need write permission, then --dry-run -> --confirm):
             [--freeze|--thaw] [--lock|--unlock] [--continue-on-error false]
   layer create --file <dwg> --names <a,b,c> [--color N] [--linetype X]
   layer delete --file <dwg> --names <a,b,c> --dangerous   (irreversible)
+  draw line --file <dwg> --layer <L> --segments x1,y1,x2,y2 [--segments ...]
+  draw circle --file <dwg> --layer <L> --circles cx,cy,r [--circles ...]
 
   reference [--command <path>]   Declared capabilities, schemas and error codes
   context                        Runtime environment, configuration, credentials
@@ -72,9 +74,11 @@ RELEASE_READINESS = {
     "live_smoke_required_for_stable": True,
     "live_smoke_status": "missing",
     "reason": (
-        "Read commands and one gated write command run against a real AutoCAD "
-        "install through the headless core engine, but there is no mock-upstream "
-        "contract suite and no recorded live smoke evidence."
+        "Read commands and five gated write commands, including geometry "
+        "creation, run against a real AutoCAD install through the headless core "
+        "engine. Still unpublishable: no mock-upstream contract suite, no "
+        "recorded live smoke evidence, and geometry is verified by counting "
+        "objects of a type rather than identifying each one."
     ),
     "required_evidence": [
         "functional_contract_coverage_100",
@@ -161,6 +165,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "shape": "object",
         "fields": ["preview", "confirm_token", "expires_at"],
         "untrusted_fields": ["preview"],
+    },
+    "draw_result": {
+        "shape": "object",
+        "fields": ["items", "summary", "layer", "verification", "backup", "backup_note"],
+        "untrusted_fields": ["items", "layer"],
     },
     "xref_list": {
         "shape": "object",
@@ -350,6 +359,76 @@ COMMANDS: list[dict[str, Any]] = [
         "examples": [
             f'{TOOL} xref list --file "C:/drawings/sheet.dwg" --compact',
             f'{TOOL} xref list --file "C:/drawings/sheet.dwg" --fields missing --compact',
+        ],
+    },
+    {
+        "path": "draw line",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Draw one or more line segments on an existing layer. Additive, so "
+            "no --dangerous gate, but it goes through permission, --dry-run for "
+            "a token, then --confirm. Verification counts objects of this type "
+            "before and after rather than identifying each one, and says so."
+        ),
+        "params": [
+            FILE_PARAM,
+            {
+                "name": "layer",
+                "type": "string",
+                "required": True,
+                "multiple": False,
+                "description": "Target layer; it must already exist.",
+            },
+            {
+                "name": "segments",
+                "type": "string",
+                "required": True,
+                "multiple": True,
+                "description": "x1,y1,x2,y2 per segment; repeat the flag for more.",
+            },
+        ],
+        "output_schema": "draw_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} draw line --file "bracket.dwg" --layer OUTLINE'
+            " --segments 0,0,100,0 --segments 100,0,100,60 --dry-run --compact",
+            f'{TOOL} draw line --file "bracket.dwg" --layer OUTLINE'
+            " --segments 0,0,100,0 --confirm <confirm_token> --compact",
+        ],
+    },
+    {
+        "path": "draw circle",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Draw one or more circles on an existing layer. Same gate and same "
+            "count-based verification as `draw line`."
+        ),
+        "params": [
+            FILE_PARAM,
+            {
+                "name": "layer",
+                "type": "string",
+                "required": True,
+                "multiple": False,
+                "description": "Target layer; it must already exist.",
+            },
+            {
+                "name": "circles",
+                "type": "string",
+                "required": True,
+                "multiple": True,
+                "description": "center_x,center_y,radius per circle; repeat the flag for more.",
+            },
+        ],
+        "output_schema": "draw_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} draw circle --file "bracket.dwg" --layer HOLES'
+            " --circles 50,30,6 --circles 80,30,6 --dry-run --compact",
+            f'{TOOL} draw circle --file "bracket.dwg" --layer HOLES'
+            " --circles 50,30,6 --confirm <confirm_token> --compact",
         ],
     },
     {
@@ -620,6 +699,23 @@ def take_continue_on_error(flags: list[str]) -> bool:
     return raw_value == "true"
 
 
+def take_repeated(flags: list[str], flag: str) -> list[str]:
+    """Collect a repeatable flag whose values are *not* comma-separated lists.
+
+    Distinct from `take_list` on purpose. In `--names a,b,c` a comma separates
+    items; in `--segments x1,y1,x2,y2` it is part of one item. Splitting the
+    second the way we split the first turned one segment into four unusable
+    fragments.
+    """
+    collected: list[str] = []
+    while flag in flags:
+        value = take_value(flags, flag)
+        if value is None:
+            break
+        collected.append(value.strip())
+    return collected
+
+
 def take_boolean(flags: list[str], flag: str) -> bool:
     if flag in flags:
         flags.remove(flag)
@@ -842,6 +938,31 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         target = require_file(flags)
         reject_unknown(flags)
         return emit_ok(drawing.xrefs(target), options, timer)
+    if name in ("draw line", "draw circle"):
+        target = require_file(flags)
+        layer = take_value(flags, "--layer")
+        if layer is None:
+            raise UsageError("--layer is required", flag="--layer")
+        kind = name.split()[1]
+        flag = "--segments" if kind == "line" else "--circles"
+        raw_shapes = take_repeated(flags, flag)
+        if not raw_shapes:
+            raise UsageError(f"{flag} is required", flag=flag)
+        dry_run = take_boolean(flags, "--dry-run")
+        token = take_value(flags, "--confirm")
+        reject_unknown(flags)
+        return emit_ok(
+            drawing.draw(
+                target,
+                kind,
+                drawing.parse_shapes(kind, raw_shapes),
+                layer=layer,
+                dry_run=dry_run,
+                confirm_token=token,
+            ),
+            options,
+            timer,
+        )
     if name in ("layer create", "layer delete"):
         target = require_file(flags)
         wanted = take_list(flags, "--names", "--name")

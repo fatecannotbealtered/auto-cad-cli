@@ -65,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layer 0, the current layer and any layer holding objects cannot be deleted -
   because AutoCAD's own delete reports refusal and success identically.
 
+- `draw line` and `draw circle`: the first commands that put new geometry into
+  a drawing, which is what makes this a drafting tool rather than an auditing
+  one. Additive, so no `--dangerous` gate, but the same permission, preview,
+  single-use token, backup and read-back as every other write. Coordinates are
+  validated before the engine sees them - a malformed number reaching AutoLISP
+  is a silent no-op at best. The target layer must already exist, because
+  `entmake` accepts an undefined layer name and leaves the objects somewhere the
+  caller did not intend.
+- Verification for geometry counts objects of the DXF type before and after and
+  reports `level: "reopened-and-counted"`. That is weaker than identifying each
+  new object, and the payload says so rather than implying more than it checked.
+
 ### Fixed
 
 - Scripts handed to the AutoCAD core engine are now written in the system

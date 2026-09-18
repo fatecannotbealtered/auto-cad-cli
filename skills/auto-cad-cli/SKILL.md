@@ -100,9 +100,14 @@ Use `--compact` when storing output in context or piping between tools.
 
 ## Write Recipe
 
-Three writes exist: `layer set`, `layer create` and `layer delete`. Every other
-command opens the drawing `/readonly` in a separate headless process and cannot
-modify anything.
+Five writes exist: `layer set`, `layer create`, `layer delete`, `draw line` and
+`draw circle`. Every other command opens the drawing `/readonly` in a separate
+headless process and cannot modify anything.
+
+To draw: create the layer first (`draw` refuses an unknown layer), then add
+geometry to it. Repeatable tuple flags are **not** comma-separated lists —
+`--segments 0,0,120,0 --segments 120,0,120,80` is two segments, whereas
+`--names a,b` is two layers.
 
 `layer delete` is **dangerous** and needs `--dangerous` in addition to
 `--confirm`. STOP CHECKPOINT: ask the user before deleting anything, and quote

@@ -1200,3 +1200,205 @@ def delete_layers(
         items.append(entry)
 
     return _batch_result(items, skipped, backup_path)
+
+
+# Geometry is created with `entmake`, which answers nil on failure - so unlike
+# `-LAYER Delete` these writes have a genuine per-item signal. The read-back
+# still runs: a signal from the write script says the object was accepted into
+# the in-memory database, not that the file on disk now holds it.
+_DRAW_SHAPES = ("line", "circle")
+
+
+def _draw_body(layer: str, shapes: list[tuple[str, tuple[float, ...]]]) -> str:
+    literal = _lisp_string(layer)
+    lines = []
+    for index, (kind, values) in enumerate(shapes):
+        if kind == "line":
+            x1, y1, x2, y2 = values
+            entity = (
+                f'(list \'(0 . "LINE") (cons 8 "{literal}")'
+                f" (list 10 {x1} {y1} 0.0) (list 11 {x2} {y2} 0.0))"
+            )
+        else:
+            cx, cy, radius = values
+            entity = (
+                f'(list \'(0 . "CIRCLE") (cons 8 "{literal}")'
+                f" (list 10 {cx} {cy} 0.0) (cons 40 {radius}))"
+            )
+        lines.append(
+            f"(if (entmake {entity})\n"
+            f'  (write-line "drawn|{index}\\tyes" f)\n'
+            f'  (write-line "drawn|{index}\\tno" f))'
+        )
+    return "\n".join([*lines, '(command "_.QSAVE")', ""])
+
+
+def _parse_tuple(raw: str, arity: int, label: str) -> tuple[float, ...]:
+    parts = [part.strip() for part in raw.split(",")]
+    if len(parts) != arity:
+        raise autocad.EngineError(
+            "E_VALIDATION",
+            f"{label} needs {arity} comma-separated numbers",
+            got=raw,
+        )
+    try:
+        return tuple(float(part) for part in parts)
+    except ValueError:
+        raise autocad.EngineError("E_VALIDATION", f"{label} must be numbers", got=raw) from None
+
+
+def parse_shapes(kind: str, raw_values: list[str]) -> list[tuple[str, tuple[float, ...]]]:
+    """Turn the repeated flag values into validated shapes.
+
+    Validation happens here rather than in AutoLISP because a malformed number
+    reaching the engine is a silent no-op at best; a clear E_VALIDATION before
+    anything is written is strictly better for the caller.
+    """
+    if kind == "line":
+        shapes = [("line", _parse_tuple(value, 4, "--segments")) for value in raw_values]
+        for _, (x1, y1, x2, y2) in shapes:
+            if (x1, y1) == (x2, y2):
+                raise autocad.EngineError(
+                    "E_VALIDATION",
+                    "a segment needs two different endpoints",
+                    got=f"{x1},{y1},{x2},{y2}",
+                )
+        return shapes
+    shapes = [("circle", _parse_tuple(value, 3, "--circles")) for value in raw_values]
+    for _, (_, _, radius) in shapes:
+        if radius <= 0:
+            raise autocad.EngineError(
+                "E_VALIDATION", "a circle needs a positive radius", got=radius
+            )
+    return shapes
+
+
+def draw(
+    drawing: Path,
+    kind: str,
+    shapes: list[tuple[str, tuple[float, ...]]],
+    *,
+    layer: str,
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Add geometry to an existing layer.
+
+    Additive, so no `--dangerous` gate - but it is the first command that puts
+    new objects into a drawing, and it goes through the same permission,
+    preview, single-use token, backup and read-back as every other write.
+
+    Verification counts objects of this DXF type before and after and checks the
+    delta. That is weaker than identifying each new object, and the result says
+    so rather than implying more than it checked.
+    """
+    confirm.require_write_permission()
+    if kind not in _DRAW_SHAPES:
+        raise autocad.EngineError(
+            "E_VALIDATION", f"unknown shape {kind!r}", supported=list(_DRAW_SHAPES)
+        )
+    if not shapes:
+        raise autocad.EngineError("E_VALIDATION", "nothing to draw: no shapes given")
+
+    # entmake will happily accept an undefined layer name and leave the objects
+    # somewhere the caller did not intend, so the layer is checked first.
+    known = {entry["name"] for entry in layers(drawing, timeout=timeout)["layers"]}
+    if layer not in known:
+        raise autocad.EngineError(
+            "E_NOT_FOUND",
+            f"the drawing has no layer named {layer!r}; create it first",
+            layer=layer,
+            available=sorted(known)[:40],
+        )
+
+    dxf_type = "LINE" if kind == "line" else "CIRCLE"
+    before = entities(drawing, timeout=timeout)["by_type"].get(dxf_type, 0)
+
+    scope = confirm.scope(
+        command=f"draw {kind}",
+        target=drawing,
+        arguments={
+            "layer": layer,
+            "shapes": [list(values) for _, values in shapes],
+        },
+        observed={"existing_of_type": before, "dxf_type": dxf_type},
+    )
+
+    if dry_run:
+        token = confirm.mint(scope)
+        return {
+            "preview": {
+                "action": "create",
+                "resource": dxf_type.lower(),
+                "layer": layer,
+                "total": len(shapes),
+                "changes": [
+                    {
+                        "action": "create",
+                        "resource": dxf_type.lower(),
+                        "id": f"#{index}",
+                        "before": None,
+                        "after": dict(zip(_SHAPE_FIELDS[kind], values, strict=True)),
+                    }
+                    for index, (_, values) in enumerate(shapes)
+                ],
+            },
+            "confirm_token": token.value,
+            "expires_at": token.expires_at,
+            "_untrusted": ["preview"],
+        }
+
+    if confirm_token is None:
+        raise autocad.EngineError(
+            "E_CONFIRMATION_REQUIRED",
+            "run the same command with --dry-run to obtain a confirm token",
+        )
+    confirm.verify_and_consume(confirm_token, scope)
+
+    backup_path = confirm.backup(drawing)
+    records = autocad.run_script(
+        _draw_body(layer, shapes), drawing=drawing, readonly=False, timeout=timeout
+    )
+    outcomes: dict[str, str] = {}
+    for key, value in records:
+        if key != "drawn":
+            continue
+        index, _, outcome = value.partition("\t")
+        outcomes[index] = outcome
+
+    after = entities(drawing, timeout=timeout)["by_type"].get(dxf_type, 0)
+    accepted = sum(1 for outcome in outcomes.values() if outcome == "yes")
+
+    items = [
+        {
+            "target": f"#{index}",
+            "ok": outcomes.get(str(index)) == "yes",
+            "shape": dict(zip(_SHAPE_FIELDS[kind], values, strict=True)),
+            **(
+                {}
+                if outcomes.get(str(index)) == "yes"
+                else {"error": {"code": "E_SERVER", "retryable": True}}
+            ),
+        }
+        for index, (_, values) in enumerate(shapes)
+    ]
+
+    result = _batch_result(items, [], backup_path)
+    result["layer"] = layer
+    result["verification"] = {
+        # Counting is weaker than identifying each object; say which was done.
+        "level": "reopened-and-counted",
+        "dxf_type": dxf_type,
+        "before": before,
+        "after": after,
+        "expected_delta": accepted,
+        "matches": after - before == accepted,
+    }
+    return result
+
+
+_SHAPE_FIELDS = {
+    "line": ("x1", "y1", "x2", "y2"),
+    "circle": ("center_x", "center_y", "radius"),
+}

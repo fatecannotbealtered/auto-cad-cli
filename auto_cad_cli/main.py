@@ -47,6 +47,8 @@ Write commands (need write permission, then --dry-run -> --confirm):
   layer delete --file <dwg> --names <a,b,c> --dangerous   (irreversible)
   draw line --file <dwg> --layer <L> --segments x1,y1,x2,y2 [--segments ...]
   draw circle --file <dwg> --layer <L> --circles cx,cy,r [--circles ...]
+  draw text --file <dwg> --layer <L> --texts "x,y,height,content" [--texts ...]
+  draw polyline --file <dwg> --layer <L> --polylines x1,y1,x2,y2,...[:closed]
 
   reference [--command <path>]   Declared capabilities, schemas and error codes
   context                        Runtime environment, configuration, credentials
@@ -74,7 +76,7 @@ RELEASE_READINESS = {
     "live_smoke_required_for_stable": True,
     "live_smoke_status": "missing",
     "reason": (
-        "Read commands and five gated write commands, including geometry "
+        "Read commands and seven gated write commands, including geometry "
         "creation, run against a real AutoCAD install through the headless core "
         "engine. Still unpublishable: no mock-upstream contract suite, no "
         "recorded live smoke evidence, and geometry is verified by counting "
@@ -176,6 +178,14 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "fields": ["xrefs", "count", "missing_count", "missing"],
         "untrusted_fields": ["xrefs", "missing"],
     },
+}
+
+LAYER_PARAM = {
+    "name": "layer",
+    "type": "string",
+    "required": True,
+    "multiple": False,
+    "description": "Target layer; it must already exist.",
 }
 
 NAMES_PARAM = {
@@ -373,13 +383,7 @@ COMMANDS: list[dict[str, Any]] = [
         ),
         "params": [
             FILE_PARAM,
-            {
-                "name": "layer",
-                "type": "string",
-                "required": True,
-                "multiple": False,
-                "description": "Target layer; it must already exist.",
-            },
+            LAYER_PARAM,
             {
                 "name": "segments",
                 "type": "string",
@@ -407,13 +411,7 @@ COMMANDS: list[dict[str, Any]] = [
         ),
         "params": [
             FILE_PARAM,
-            {
-                "name": "layer",
-                "type": "string",
-                "required": True,
-                "multiple": False,
-                "description": "Target layer; it must already exist.",
-            },
+            LAYER_PARAM,
             {
                 "name": "circles",
                 "type": "string",
@@ -429,6 +427,67 @@ COMMANDS: list[dict[str, Any]] = [
             " --circles 50,30,6 --circles 80,30,6 --dry-run --compact",
             f'{TOOL} draw circle --file "bracket.dwg" --layer HOLES'
             " --circles 50,30,6 --confirm <confirm_token> --compact",
+        ],
+    },
+    {
+        "path": "draw text",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Place one or more single-line text objects on an existing layer. "
+            "Each value is x,y,height,content - the content is everything after "
+            "the third comma, so it may contain commas of its own."
+        ),
+        "params": [
+            FILE_PARAM,
+            LAYER_PARAM,
+            {
+                "name": "texts",
+                "type": "string",
+                "required": True,
+                "multiple": True,
+                "description": "x,y,height,content per label; repeat the flag for more.",
+            },
+        ],
+        "output_schema": "draw_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} draw text --file "bracket.dwg" --layer NOTES'
+            ' --texts "10,90,5,PLATE A-01" --dry-run --compact',
+            f'{TOOL} draw text --file "bracket.dwg" --layer NOTES'
+            ' --texts "10,90,5,PLATE A-01" --confirm <confirm_token> --compact',
+        ],
+    },
+    {
+        "path": "draw polyline",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Draw one or more lightweight polylines on an existing layer. Each "
+            "value is an even list of x,y pairs; append :closed to close the "
+            "shape."
+        ),
+        "params": [
+            FILE_PARAM,
+            LAYER_PARAM,
+            {
+                "name": "polylines",
+                "type": "string",
+                "required": True,
+                "multiple": True,
+                "description": (
+                    "x1,y1,x2,y2,... per polyline, optionally suffixed :closed; "
+                    "repeat the flag for more."
+                ),
+            },
+        ],
+        "output_schema": "draw_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} draw polyline --file "bracket.dwg" --layer OUTLINE'
+            " --polylines 0,0,120,0,120,80,0,80:closed --dry-run --compact",
+            f'{TOOL} draw polyline --file "bracket.dwg" --layer OUTLINE'
+            " --polylines 0,0,120,0,120,80,0,80:closed --confirm <confirm_token> --compact",
         ],
     },
     {
@@ -938,13 +997,13 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         target = require_file(flags)
         reject_unknown(flags)
         return emit_ok(drawing.xrefs(target), options, timer)
-    if name in ("draw line", "draw circle"):
+    if name.startswith("draw ") and name.split()[1] in drawing.DRAW_FLAGS:
         target = require_file(flags)
         layer = take_value(flags, "--layer")
         if layer is None:
             raise UsageError("--layer is required", flag="--layer")
         kind = name.split()[1]
-        flag = "--segments" if kind == "line" else "--circles"
+        flag = drawing.DRAW_FLAGS[kind]
         raw_shapes = take_repeated(flags, flag)
         if not raw_shapes:
             raise UsageError(f"{flag} is required", flag=flag)

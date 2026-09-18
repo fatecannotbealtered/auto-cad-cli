@@ -100,8 +100,8 @@ Use `--compact` when storing output in context or piping between tools.
 
 ## Write Recipe
 
-Five writes exist: `layer set`, `layer create`, `layer delete`, `draw line` and
-`draw circle`. Every other command opens the drawing `/readonly` in a separate
+Seven writes exist: `layer set`, `layer create`, `layer delete`, `draw line`,
+`draw circle`, `draw text` and `draw polyline`. Every other command opens the drawing `/readonly` in a separate
 headless process and cannot modify anything.
 
 To draw: create the layer first (`draw` refuses an unknown layer), then add

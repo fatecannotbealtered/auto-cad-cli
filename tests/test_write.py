@@ -558,3 +558,73 @@ def test_repeated_tuple_flags_are_not_split_on_commas():
     flags = ["--segments", "0,0,120,0", "--segments", "120,0,120,80"]
     assert take_repeated(list(flags), "--segments") == ["0,0,120,0", "120,0,120,80"]
     assert take_list(list(flags), "--segments") == ["0", "0", "120", "0", "120", "0", "120", "80"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "raw", "message"),
+    [
+        ("text", "0,0,2", "x,y,height,content"),
+        ("text", "0,0,0,hi", "positive height"),
+        ("text", "0,0,2,", "content is empty"),
+        ("polyline", "0,0", "even count"),
+        ("polyline", "0,0,1", "even count"),
+        ("polyline", "a,b,c,d", "must be numbers"),
+    ],
+)
+def test_malformed_text_and_polyline_are_rejected(kind, raw, message):
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.parse_shapes(kind, [raw])
+    assert caught.value.code == "E_VALIDATION"
+    assert message in caught.value.message
+
+
+def test_text_content_may_contain_commas():
+    """Content is everything after the third comma, so no escape rule is needed."""
+    (shape,) = drawing.parse_shapes("text", ["10,90,5,PLATE A-01, 4 holes"])
+    assert shape[1] == (10.0, 90.0, 5.0, "PLATE A-01, 4 holes")
+
+
+def test_polyline_closing_suffix_is_parsed():
+    (open_shape,) = drawing.parse_shapes("polyline", ["0,0,10,0,10,10"])
+    (closed_shape,) = drawing.parse_shapes("polyline", ["0,0,10,0,10,10:closed"])
+    assert open_shape[1] == ([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)], False)
+    assert closed_shape[1][1] is True
+
+
+@needs_autocad
+def test_draw_text_writes_non_ascii_content(writable, tmp_path):
+    """The script reaches the engine in the system codepage, not UTF-8."""
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    label = "PLATE A-01"
+    shapes = drawing.parse_shapes("text", [f"10,90,5,{label}"])
+    preview = drawing.draw(work, "text", shapes, layer="0", dry_run=True)
+    applied = drawing.draw(work, "text", shapes, layer="0", confirm_token=preview["confirm_token"])
+    assert applied["summary"]["succeeded"] == 1
+    assert applied["verification"]["dxf_type"] == "TEXT"
+    found = [item["content"] for item in drawing.text(work)["items"]]
+    assert label in found
+
+
+@needs_autocad
+def test_draw_polyline_creates_a_closed_shape(writable, tmp_path):
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    shapes = drawing.parse_shapes("polyline", ["0,0,120,0,120,80,0,80:closed"])
+    preview = drawing.draw(work, "polyline", shapes, layer="0", dry_run=True)
+    applied = drawing.draw(
+        work, "polyline", shapes, layer="0", confirm_token=preview["confirm_token"]
+    )
+    assert applied["summary"]["succeeded"] == 1
+    assert applied["verification"]["dxf_type"] == "LWPOLYLINE"
+    assert applied["verification"]["matches"] is True
+
+
+def test_every_draw_shape_is_declared_with_its_own_flag():
+    """`reference` must name the flag each shape actually takes."""
+    code, stdout = run("reference", "--compact")
+    commands = {c["path"]: c for c in json.loads(stdout)["data"]["commands"]}
+    for kind, flag in drawing.DRAW_FLAGS.items():
+        command = commands[f"draw {kind}"]
+        assert command["type"] == "write"
+        assert any(param["name"] == flag.lstrip("-") for param in command["params"]), kind

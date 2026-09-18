@@ -65,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layer 0, the current layer and any layer holding objects cannot be deleted -
   because AutoCAD's own delete reports refusal and success identically.
 
+- `draw text` and `draw polyline` round out the geometry set. A text value is
+  `x,y,height,content` where the content is everything after the third comma, so
+  a label may contain commas without the caller needing an escape rule; a
+  polyline value is an even list of x,y pairs, optionally suffixed `:closed`.
 - `draw line` and `draw circle`: the first commands that put new geometry into
   a drawing, which is what makes this a drafting tool rather than an auditing
   one. Additive, so no `--dangerous` gate, but the same permission, preview,

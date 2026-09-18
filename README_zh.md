@@ -72,7 +72,7 @@ PowerShell 使用 `$env:NAME = "value"` 设置同样的环境变量。真实密�
 | 图层修改 | `layer set` | **写操作。** 颜色与 开/冻结/锁定 状态，支持批量，走确认门禁。 |
 | 图层新建 | `layer create` | **写操作。** 批量创建图层。 |
 | 图层删除 | `layer delete` | **写操作·危险。** `--confirm` 之外还需 `--dangerous`。 |
-| 几何 | `draw line`, `draw circle` | **写操作。** 在已有图层上画线段与圆。 |
+| 几何 | `draw line`, `draw circle`, `draw text`, `draw polyline` | **写操作。** 在已有图层上画几何与标注。 |
 | 自描述 | `reference`, `context`, `doctor`, `changelog`, `update` | 用实时能力和版本变化引导 Agent。 |
 
 README 只做地图，不做完整手册。Agent 在执行任务命令前，应调用 `auto-cad-cli reference --compact` 获取准确的 flags、schemas、权限、退出码和错误码。

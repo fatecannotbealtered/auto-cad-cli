@@ -1206,7 +1206,7 @@ def delete_layers(
 # `-LAYER Delete` these writes have a genuine per-item signal. The read-back
 # still runs: a signal from the write script says the object was accepted into
 # the in-memory database, not that the file on disk now holds it.
-_DRAW_SHAPES = ("line", "circle")
+_DRAW_SHAPES = ("line", "circle", "text", "polyline")
 
 
 def _draw_body(layer: str, shapes: list[tuple[str, tuple[float, ...]]]) -> str:
@@ -1219,11 +1219,28 @@ def _draw_body(layer: str, shapes: list[tuple[str, tuple[float, ...]]]) -> str:
                 f'(list \'(0 . "LINE") (cons 8 "{literal}")'
                 f" (list 10 {x1} {y1} 0.0) (list 11 {x2} {y2} 0.0))"
             )
-        else:
+        elif kind == "circle":
             cx, cy, radius = values
             entity = (
                 f'(list \'(0 . "CIRCLE") (cons 8 "{literal}")'
                 f" (list 10 {cx} {cy} 0.0) (cons 40 {radius}))"
+            )
+        elif kind == "text":
+            x, y, height, content = values
+            entity = (
+                f'(list \'(0 . "TEXT") (cons 8 "{literal}")'
+                f" (list 10 {x} {y} 0.0) (cons 40 {height})"
+                f' (cons 1 "{_lisp_string(str(content))}"))'
+            )
+        else:
+            points, closed = values
+            vertices = " ".join(f"(list 10 {x} {y})" for x, y in points)
+            entity = (
+                '(append (list \'(0 . "LWPOLYLINE")'
+                ' \'(100 . "AcDbEntity") \'(100 . "AcDbPolyline")'
+                f' (cons 8 "{literal}") (cons 90 {len(points)})'
+                f" (cons 70 {1 if closed else 0}))"
+                f" (list {vertices}))"
             )
         lines.append(
             f"(if (entmake {entity})\n"
@@ -1264,13 +1281,55 @@ def parse_shapes(kind: str, raw_values: list[str]) -> list[tuple[str, tuple[floa
                     got=f"{x1},{y1},{x2},{y2}",
                 )
         return shapes
-    shapes = [("circle", _parse_tuple(value, 3, "--circles")) for value in raw_values]
-    for _, (_, _, radius) in shapes:
-        if radius <= 0:
+    if kind == "circle":
+        shapes = [("circle", _parse_tuple(value, 3, "--circles")) for value in raw_values]
+        for _, (_, _, radius) in shapes:
+            if radius <= 0:
+                raise autocad.EngineError(
+                    "E_VALIDATION", "a circle needs a positive radius", got=radius
+                )
+        return shapes
+
+    if kind == "text":
+        # Content is everything after the third comma, so a string may contain
+        # commas of its own without the caller needing an escape rule.
+        texts = []
+        for value in raw_values:
+            parts = value.split(",", 3)
+            if len(parts) != 4:
+                raise autocad.EngineError(
+                    "E_VALIDATION", "--texts needs x,y,height,content", got=value
+                )
+            x, y, height = _parse_tuple(",".join(parts[:3]), 3, "--texts")
+            if height <= 0:
+                raise autocad.EngineError(
+                    "E_VALIDATION", "text needs a positive height", got=height
+                )
+            if not parts[3]:
+                raise autocad.EngineError("E_VALIDATION", "text content is empty", got=value)
+            texts.append(("text", (x, y, height, parts[3])))
+        return texts
+
+    polylines = []
+    for value in raw_values:
+        closed = value.endswith(":closed")
+        numbers = _coordinates(value[: -len(":closed")] if closed else value)
+        if len(numbers) < 4 or len(numbers) % 2:
             raise autocad.EngineError(
-                "E_VALIDATION", "a circle needs a positive radius", got=radius
+                "E_VALIDATION",
+                "--polylines needs an even count of at least four numbers (x,y pairs)",
+                got=value,
             )
-    return shapes
+        points = list(zip(numbers[::2], numbers[1::2], strict=True))
+        polylines.append(("polyline", (points, closed)))
+    return polylines
+
+
+def _coordinates(raw: str) -> list[float]:
+    try:
+        return [float(part.strip()) for part in raw.split(",") if part.strip()]
+    except ValueError:
+        raise autocad.EngineError("E_VALIDATION", "--polylines must be numbers", got=raw) from None
 
 
 def draw(
@@ -1312,7 +1371,7 @@ def draw(
             available=sorted(known)[:40],
         )
 
-    dxf_type = "LINE" if kind == "line" else "CIRCLE"
+    dxf_type = DRAW_DXF_TYPES[kind]
     before = entities(drawing, timeout=timeout)["by_type"].get(dxf_type, 0)
 
     scope = confirm.scope(
@@ -1401,4 +1460,21 @@ def draw(
 _SHAPE_FIELDS = {
     "line": ("x1", "y1", "x2", "y2"),
     "circle": ("center_x", "center_y", "radius"),
+    "text": ("x", "y", "height", "content"),
+    "polyline": ("points", "closed"),
+}
+
+# Which repeatable flag carries each shape, and the DXF type it becomes.
+DRAW_FLAGS = {
+    "line": "--segments",
+    "circle": "--circles",
+    "text": "--texts",
+    "polyline": "--polylines",
+}
+
+DRAW_DXF_TYPES = {
+    "line": "LINE",
+    "circle": "CIRCLE",
+    "text": "TEXT",
+    "polyline": "LWPOLYLINE",
 }

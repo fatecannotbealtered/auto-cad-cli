@@ -1,8 +1,9 @@
-"""Read-only drawing commands, served by the headless core engine.
+"""Drawing commands, served by the headless core engine.
 
-Everything here opens the drawing with `/readonly` in a separate accoreconsole
-process, so a command can never disturb a drawing the operator has open in the
-GUI, and none of it needs an AutoCAD window at all.
+Reads open the drawing `/readonly` in a separate accoreconsole process, so they
+can never disturb a drawing the operator has open in the GUI, and none of them
+needs an AutoCAD window at all. `set_layers` is the one write, and it goes
+through the gate in `confirm` before touching anything.
 
 Content read out of a DWG - layer names, linetype names, the drawing name - is
 external data authored by whoever produced the file. It is reported under
@@ -417,8 +418,12 @@ def _lisp_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _layer_apply_body(name: str, color: int, flags: int) -> str:
-    """Modify one layer record, then save.
+def _layer_apply_body(plan: list[tuple[str, int, int]]) -> str:
+    """Modify several layer records in one engine run, then save once.
+
+    Batching matters here beyond tidiness: each accoreconsole start costs about
+    three seconds, so a per-layer loop would turn a twenty-layer change into a
+    minute of process launches.
 
     `(command "_.QSAVE")` is the single deliberate exception to this module's
     no-`command` rule: there is no other way to save from the core engine.
@@ -427,20 +432,22 @@ def _layer_apply_body(name: str, color: int, flags: int) -> str:
     and changes nothing. That silent no-op is exactly why the write path
     re-opens the file afterwards and verifies rather than trusting this script.
     """
-    return f"""
-(setq e (tblobjname "LAYER" "{_lisp_string(name)}"))
-(if e
-  (progn
-    (setq d (entget e))
-    (setq d (subst (cons 62 {color}) (assoc 62 d) d))
-    (setq d (subst (cons 70 {flags}) (assoc 70 d) d))
-    (if (entmod d)
-      (write-line "applied|yes" f)
-      (write-line "applied|no" f)))
-  (write-line "applied|absent" f))
-(command "_.QSAVE")
-(write-line "saved|yes" f)
-"""
+    blocks = []
+    for name, color, flags in plan:
+        literal = _lisp_string(name)
+        blocks.append(
+            f'(setq e (tblobjname "LAYER" "{literal}"))\n'
+            "(if e\n"
+            "  (progn\n"
+            "    (setq d (entget e))\n"
+            f"    (setq d (subst (cons 62 {color}) (assoc 62 d) d))\n"
+            f"    (setq d (subst (cons 70 {flags}) (assoc 70 d) d))\n"
+            "    (if (entmod d)\n"
+            f'      (write-line "applied|{literal}\\tyes" f)\n'
+            f'      (write-line "applied|{literal}\\tno" f)))\n'
+            f'  (write-line "applied|{literal}\\tabsent" f))'
+        )
+    return "\n".join([*blocks, '(command "_.QSAVE")', '(write-line "saved|yes" f)', ""])
 
 
 def _as_float(value: str, default: float = 0.0) -> float:
@@ -602,18 +609,17 @@ def text(drawing: Path, limit: int | None = None, timeout: float | None = None) 
     return data
 
 
-def _find_layer(drawing: Path, name: str, timeout: float | None) -> dict[str, Any]:
-    """Current state of one layer, or E_NOT_FOUND naming what is there."""
-    table = layers(drawing, timeout=timeout)["layers"]
-    for layer in table:
-        if layer["name"] == name:
-            return layer
-    raise autocad.EngineError(
-        "E_NOT_FOUND",
-        f"the drawing has no layer named {name!r}",
-        layer=name,
-        available=[entry["name"] for entry in table][:40],
-    )
+def _resolve_targets(names: list[str]) -> list[str]:
+    """De-duplicate while preserving the caller's order.
+
+    Input order is what an agent maps results back onto, so `items[]` must come
+    back in it (CLI-SPEC section 15.1).
+    """
+    if not names:
+        raise autocad.EngineError(
+            "E_VALIDATION", "no layers named: --names takes at least one layer"
+        )
+    return list(dict.fromkeys(names))
 
 
 def _desired(current: dict[str, Any], **wanted: Any) -> dict[str, Any]:
@@ -634,9 +640,9 @@ def _encode(state: dict[str, Any]) -> tuple[int, int]:
     return color, flags
 
 
-def set_layer(
+def set_layers(
     drawing: Path,
-    name: str,
+    names: list[str],
     *,
     color: int | None = None,
     on: bool | None = None,
@@ -644,15 +650,15 @@ def set_layer(
     locked: bool | None = None,
     dry_run: bool = False,
     confirm_token: str | None = None,
+    continue_on_error: bool = True,
     timeout: float | None = None,
 ) -> dict[str, Any]:
-    """Change one layer's colour or on/frozen/locked state.
+    """Change colour or on/frozen/locked state on one or more layers.
 
-    The smallest useful write in the tool: bounded to a single named object, and
-    reversible by running the inverse command. Even so it goes through the full
-    gate - permission, preview, single-use token, backup, and an independent
-    read-back - because the machinery has to be right before anything larger
-    uses it.
+    One command, one envelope, one confirm token and one aggregated result no
+    matter how many layers are named (CLI-SPEC section 15). A single layer is a
+    batch of one and comes back in the same shape, so an agent never has to
+    branch on how many it asked for.
     """
     # Fail closed before doing any work, so an agent learns it cannot write at
     # the moment it plans the write rather than after building on the preview.
@@ -670,35 +676,65 @@ def set_layer(
             "E_VALIDATION", "--color must be an AutoCAD Color Index in 1..255", color=color
         )
 
-    current = _find_layer(drawing, name, timeout)
-    target = _desired(current, **requested)
-    changed = {k: (current[k], target[k]) for k in target if current[k] != target[k]}
+    targets = _resolve_targets(names)
+    table = {layer["name"]: layer for layer in layers(drawing, timeout=timeout)["layers"]}
 
+    # Resolve every target up front. A name that is not in the drawing becomes
+    # its own failed item rather than sinking the batch: hiding nineteen good
+    # results behind one typo would be the worse failure.
+    plan: list[dict[str, Any]] = []
+    for name in targets:
+        current = table.get(name)
+        if current is None:
+            plan.append({"target": name, "missing": True})
+            continue
+        wanted = _desired(current, **requested)
+        plan.append(
+            {
+                "target": name,
+                "missing": False,
+                "current": current,
+                "wanted": wanted,
+                "delta": {k: v for k, v in wanted.items() if current[k] != v},
+            }
+        )
+
+    applicable = [item for item in plan if not item["missing"]]
     scope = confirm.scope(
         command="layer set",
         target=drawing,
-        arguments={"name": name, **{k: v for k, v in requested.items() if v is not None}},
-        observed=current,
+        arguments={
+            "names": targets,
+            **{k: v for k, v in requested.items() if v is not None},
+            "continue_on_error": continue_on_error,
+        },
+        # Binds the whole resolved set: adding or removing a target, or any of
+        # them moving underneath us, voids the token (CLI-SPEC section 15.2).
+        observed={item["target"]: item.get("current") for item in plan},
     )
-    preview = {
-        "changes": [
-            {
-                "action": "modify",
-                "resource": "layer",
-                "id": name,
-                "before": {k: current[k] for k in changed},
-                "after": {k: target[k] for k in changed},
-            }
-        ]
-        if changed
-        else [],
-        "no_op": not changed,
-    }
 
     if dry_run:
         token = confirm.mint(scope)
         return {
-            "preview": preview,
+            "preview": {
+                "action": "modify",
+                "resource": "layer",
+                "total": len(targets),
+                "targets": targets,
+                "changes": [
+                    {
+                        "action": "modify",
+                        "resource": "layer",
+                        "id": item["target"],
+                        "before": {k: item["current"][k] for k in item["delta"]},
+                        "after": dict(item["delta"]),
+                    }
+                    for item in applicable
+                    if item["delta"]
+                ],
+                "unchanged": [item["target"] for item in applicable if not item["delta"]],
+                "unresolved": [item["target"] for item in plan if item["missing"]],
+            },
             "confirm_token": token.value,
             "expires_at": token.expires_at,
             "_untrusted": ["preview"],
@@ -713,35 +749,79 @@ def set_layer(
     # Spends the token; any mismatch with the scope raises E_CONFLICT.
     confirm.verify_and_consume(confirm_token, scope)
 
-    backup_path = confirm.backup(drawing)
-    color_code, flags = _encode(target)
-    records = autocad.run_script(
-        _layer_apply_body(name, color_code, flags),
-        drawing=drawing,
-        readonly=False,
-        timeout=timeout,
-    )
-    applied = _first(records, "applied")
+    # `--continue-on-error false` stops at the first target that cannot be
+    # applied. Anything past it is reported as skipped so the agent can resume
+    # instead of guessing how far the batch got (CLI-SPEC section 15.5).
+    attempt, skipped = applicable, []
+    if not continue_on_error:
+        stop_at = next((index for index, item in enumerate(plan) if item["missing"]), None)
+        if stop_at is not None:
+            attempt = [item for item in plan[:stop_at] if not item["missing"]]
+            skipped = [item["target"] for item in plan[stop_at + 1 :]]
+
+    backup_path = confirm.backup(drawing) if attempt else None
+    outcomes: dict[str, str] = {}
+    if attempt:
+        records = autocad.run_script(
+            _layer_apply_body([(item["target"], *_encode(item["wanted"])) for item in attempt]),
+            drawing=drawing,
+            readonly=False,
+            timeout=timeout,
+        )
+        for key, value in records:
+            if key != "applied":
+                continue
+            name, _, outcome = value.partition("\t")
+            outcomes[name] = outcome
 
     # Re-open the file from disk in a fresh engine run. The in-memory result of
     # the write cannot vouch for what actually landed.
-    observed = _find_layer(drawing, name, timeout)
-    matches = all(observed[key] == value for key, value in target.items())
+    verified = {layer["name"]: layer for layer in layers(drawing, timeout=timeout)["layers"]}
+
+    items: list[dict[str, Any]] = []
+    for item in plan:
+        name = item["target"]
+        if item["missing"]:
+            items.append(
+                {"target": name, "ok": False, "error": {"code": "E_NOT_FOUND", "retryable": False}}
+            )
+            continue
+        if name in skipped or name not in outcomes:
+            items.append(
+                {
+                    "target": name,
+                    "ok": False,
+                    "skipped": True,
+                    "error": {"code": "E_CONFLICT", "retryable": True},
+                }
+            )
+            continue
+        observed = verified.get(name)
+        matched = observed is not None and all(
+            observed[key] == value for key, value in item["wanted"].items()
+        )
+        entry: dict[str, Any] = {
+            "target": name,
+            "ok": outcomes[name] == "yes" and matched,
+            "changed": bool(item["delta"]),
+            "after": observed,
+        }
+        if not entry["ok"]:
+            entry["error"] = {"code": "E_SERVER", "retryable": True}
+        items.append(entry)
+
+    succeeded = sum(1 for entry in items if entry["ok"])
+    summary = {"total": len(items), "succeeded": succeeded, "failed": len(items) - succeeded}
+    if skipped:
+        summary["skipped"] = len(skipped)
 
     return {
-        "layer": name,
-        "applied": applied == "yes",
-        "changed": bool(changed),
-        "before": current,
-        "after": observed,
-        "verification": {
-            "level": "reopened-and-compared",
-            "matches": matches,
-            "intended": target,
-        },
+        "items": items,
+        "summary": summary,
+        "verification": {"level": "reopened-and-compared", "matches": summary["failed"] == 0},
         "backup": str(backup_path) if backup_path else None,
         "backup_note": (
             "byte copy of the file as it was on disk; unsaved editor state is not covered"
         ),
-        "_untrusted": ["layer", "before", "after"],
+        "_untrusted": ["items"],
     }

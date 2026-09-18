@@ -37,8 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   location, language and engine path; `AUTO_CAD_CLI_ACAD_HOME` overrides
   discovery and `AUTO_CAD_CLI_TIMEOUT` bounds engine calls.
 
-- `layer set`: the first write command, and the full CLI-SPEC section 7 gate
-  behind it. Writes are disabled until a human sets `{"permission": "write"}` in
+- `layer set`: the first write command, and the full CLI-SPEC section 7 and 15
+  gates behind it. It takes `--names` comma-separated or repeated, applies the
+  whole batch in one engine run, and returns `items[]` plus
+  `summary{total,succeeded,failed}` however many layers were named - a single
+  layer is a batch of one and answers in the same shape. An unknown name becomes
+  its own failed item rather than sinking the batch, and
+  `--continue-on-error false` stops at the first one and reports the rest as
+  skipped. `--name` survives as a deprecated singular alias. Writes are disabled until a human sets `{"permission": "write"}` in
   the config file - there is deliberately no command to enable them, so an agent
   cannot escalate itself. A `--dry-run` mints a single-use confirm token bound by
   HMAC to the command, its arguments, the file's digest, the layer's observed

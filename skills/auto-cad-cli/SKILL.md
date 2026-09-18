@@ -104,15 +104,23 @@ Use `--compact` when storing output in context or piping between tools.
 `/readonly` in a separate headless process and cannot modify anything.
 
 ```bash
-auto-cad-cli layer set --file <dwg> --name <layer> --color 3 --dry-run --compact
-auto-cad-cli layer set --file <dwg> --name <layer> --color 3 --confirm ct_... --compact
+auto-cad-cli layer set --file <dwg> --names <a,b,c> --color 3 --dry-run --compact
+auto-cad-cli layer set --file <dwg> --names <a,b,c> --color 3 --confirm ct_... --compact
 ```
+
+`--names` takes a comma-separated list or repeated flags; several layers are one
+command, one token and one aggregated `items[]` + `summary`. Do **not** loop the
+command per layer — each run costs a fresh engine start.
 
 Rules:
 
-- Pass the *same* arguments to both steps. The token is bound to them, to the
-  file's contents and to the layer's observed state; change any of it and the
-  confirm fails with `E_CONFLICT` rather than applying a stale preview.
+- Read `summary` and `items[]`, not just the exit code. A batch that ran returns
+  success at the envelope level even when individual targets failed; an unknown
+  layer comes back as that item's own `E_NOT_FOUND`.
+- Pass the *same* arguments to both steps. The token binds the whole resolved
+  target set, the file's contents and each layer's observed state, so adding or
+  dropping a target — or anyone editing the drawing in between — makes the
+  confirm fail with `E_CONFLICT` rather than applying a stale preview.
 - A token is single-use. If a confirm times out, do **not** resend it — re-run
   `--dry-run` and read the current state before deciding anything.
 - Never fabricate or edit a token. There is no `--force`.

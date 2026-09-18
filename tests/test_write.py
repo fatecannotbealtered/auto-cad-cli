@@ -172,7 +172,7 @@ def test_layer_set_is_refused_without_permission(state, target):
         "set",
         "--file",
         str(target),
-        "--name",
+        "--names",
         "0",
         "--color",
         "3",
@@ -196,7 +196,7 @@ def test_layer_set_requires_a_layer_name(state, target):
         env_extra={confirm.ENV_STATE_DIR: str(state)},
     )
     assert code == 2
-    assert json.loads(stdout)["error"]["details"]["flag"] == "--name"
+    assert json.loads(stdout)["error"]["details"]["flag"] == "--names"
 
 
 def test_opposite_switches_are_a_usage_error(state, target):
@@ -205,7 +205,7 @@ def test_opposite_switches_are_a_usage_error(state, target):
         "set",
         "--file",
         str(target),
-        "--name",
+        "--names",
         "0",
         "--on",
         "--off",
@@ -247,14 +247,15 @@ def test_layer_set_applies_and_verifies_against_a_real_drawing(writable, tmp_pat
     name = "0"
     wanted = 5 if before[name]["color"] != 5 else 6
 
-    preview = drawing.set_layer(work, name, color=wanted, dry_run=True)
+    preview = drawing.set_layers(work, [name], color=wanted, dry_run=True)
     assert preview["preview"]["changes"], preview
-    assert preview["preview"]["no_op"] is False
+    assert preview["preview"]["total"] == 1
+    assert preview["preview"]["unresolved"] == []
 
-    applied = drawing.set_layer(work, name, color=wanted, confirm_token=preview["confirm_token"])
-    assert applied["applied"] is True
-    assert applied["changed"] is True
-    assert applied["after"]["color"] == wanted
+    applied = drawing.set_layers(work, [name], color=wanted, confirm_token=preview["confirm_token"])
+    assert applied["summary"] == {"total": 1, "succeeded": 1, "failed": 0}
+    assert applied["items"][0]["ok"] is True
+    assert applied["items"][0]["after"]["color"] == wanted
     # Verification re-opened the file rather than trusting the write script,
     # which is what catches a save that silently did nothing.
     assert applied["verification"]["level"] == "reopened-and-compared"
@@ -266,13 +267,44 @@ def test_layer_set_applies_and_verifies_against_a_real_drawing(writable, tmp_pat
 
 
 @needs_autocad
-def test_layer_set_refuses_an_unknown_layer(writable, tmp_path):
+def test_a_batch_changes_every_named_layer_in_one_pass(writable, tmp_path):
+    """Several layers, one token, one aggregated result (CLI-SPEC section 15)."""
     work = tmp_path / "work.dwg"
     work.write_bytes(SAMPLE.read_bytes())
-    with pytest.raises(autocad.EngineError) as caught:
-        drawing.set_layer(work, "no-such-layer", color=3, dry_run=True)
-    assert caught.value.code == "E_NOT_FOUND"
-    assert caught.value.details["available"]
+    names = [layer["name"] for layer in drawing.layers(work)["layers"]][:3]
+    assert len(names) >= 2, "sample drawing is too small for a batch test"
+
+    preview = drawing.set_layers(work, names, locked=True, dry_run=True)
+    assert preview["preview"]["targets"] == names
+    assert preview["preview"]["total"] == len(names)
+
+    applied = drawing.set_layers(work, names, locked=True, confirm_token=preview["confirm_token"])
+    assert applied["summary"]["total"] == len(names)
+    assert applied["summary"]["succeeded"] == len(names)
+    assert [item["target"] for item in applied["items"]] == names
+
+    after = {layer["name"]: layer for layer in drawing.layers(work)["layers"]}
+    assert all(after[name]["locked"] for name in names)
+
+
+@needs_autocad
+def test_an_unknown_target_fails_only_itself(writable, tmp_path):
+    """One typo must not hide the result of every other target."""
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    real = drawing.layers(work)["layers"][0]["name"]
+    names = [real, "no-such-layer"]
+
+    preview = drawing.set_layers(work, names, locked=True, dry_run=True)
+    assert preview["preview"]["unresolved"] == ["no-such-layer"]
+
+    applied = drawing.set_layers(work, names, locked=True, confirm_token=preview["confirm_token"])
+    assert applied["summary"] == {"total": 2, "succeeded": 1, "failed": 1}
+    by_target = {item["target"]: item for item in applied["items"]}
+    assert by_target[real]["ok"] is True
+    assert by_target["no-such-layer"]["error"]["code"] == "E_NOT_FOUND"
+    # Top-level success: the batch ran; per-item status lives in items[].
+    assert applied["verification"]["matches"] is False
 
 
 @needs_autocad
@@ -280,17 +312,40 @@ def test_layer_set_without_a_token_asks_for_a_dry_run(writable, tmp_path):
     work = tmp_path / "work.dwg"
     work.write_bytes(SAMPLE.read_bytes())
     with pytest.raises(autocad.EngineError) as caught:
-        drawing.set_layer(work, "0", color=3)
+        drawing.set_layers(work, ["0"], color=3)
     assert caught.value.code == "E_CONFIRMATION_REQUIRED"
+
+
+@needs_autocad
+def test_changing_the_target_set_voids_the_token(writable, tmp_path):
+    """The token binds the whole resolved batch, not just the arguments."""
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    names = [layer["name"] for layer in drawing.layers(work)["layers"]][:2]
+    preview = drawing.set_layers(work, names, locked=True, dry_run=True)
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.set_layers(work, names[:1], locked=True, confirm_token=preview["confirm_token"])
+    assert caught.value.code == "E_CONFLICT"
+
+
+def test_an_empty_target_list_is_a_validation_error(writable, target):
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.set_layers(target, [], color=3, dry_run=True)
+    assert caught.value.code == "E_VALIDATION"
 
 
 def test_nothing_to_change_is_a_validation_error(writable, target):
     with pytest.raises(autocad.EngineError) as caught:
-        drawing.set_layer(target, "0", dry_run=True)
+        drawing.set_layers(target, ["0"], dry_run=True)
     assert caught.value.code == "E_VALIDATION"
 
 
 def test_colour_outside_the_index_is_rejected(writable, target):
     with pytest.raises(autocad.EngineError) as caught:
-        drawing.set_layer(target, "0", color=999, dry_run=True)
+        drawing.set_layers(target, ["0"], color=999, dry_run=True)
     assert caught.value.code == "E_VALIDATION"
+
+
+def test_duplicate_targets_collapse_but_keep_order(writable, target, monkeypatch):
+    """Order is what an agent maps results back onto."""
+    assert drawing._resolve_targets(["b", "a", "b", "c", "a"]) == ["b", "a", "c"]

@@ -41,8 +41,8 @@ Read commands (the drawing is opened /readonly in a headless engine):
   xref list --file <dwg>         External references and whether their files exist
 
 Write command (needs write permission, then --dry-run -> --confirm):
-  layer set --file <dwg> --name <layer> [--color N] [--on|--off]
-            [--freeze|--thaw] [--lock|--unlock]
+  layer set --file <dwg> --names <a,b,c> [--color N] [--on|--off]
+            [--freeze|--thaw] [--lock|--unlock] [--continue-on-error false]
 
   reference [--command <path>]   Declared capabilities, schemas and error codes
   context                        Runtime environment, configuration, credentials
@@ -152,17 +152,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "layer_set": {
         "shape": "object",
-        "fields": [
-            "layer",
-            "applied",
-            "changed",
-            "before",
-            "after",
-            "verification",
-            "backup",
-            "backup_note",
-        ],
-        "untrusted_fields": ["layer", "before", "after"],
+        "fields": ["items", "summary", "verification", "backup", "backup_note"],
+        "untrusted_fields": ["items"],
     },
     "layer_set_preview": {
         "shape": "object",
@@ -345,19 +336,43 @@ COMMANDS: list[dict[str, Any]] = [
         "type": "write",
         "dangerous": False,
         "description": (
-            "Change one layer's colour or its on/frozen/locked state. Requires "
-            "write permission enabled by a human in the config file, then "
-            "--dry-run to obtain a confirm token, then --confirm. The file is "
-            "backed up first and re-opened afterwards to verify what landed."
+            "Change colour or on/frozen/locked state on one or more layers. "
+            "One command, one confirm token and one aggregated result however "
+            "many are named. Requires write permission enabled by a human in "
+            "the config file, then --dry-run to obtain a token, then --confirm. "
+            "The file is backed up first and re-opened afterwards to verify "
+            "what landed."
         ),
         "params": [
             FILE_PARAM,
             {
-                "name": "name",
+                "name": "names",
                 "type": "string",
                 "required": True,
+                "multiple": True,
+                "description": (
+                    "Layers to modify, comma-separated or repeated. They must "
+                    "already exist; an unknown name becomes its own failed item "
+                    "rather than sinking the batch."
+                ),
+            },
+            {
+                "name": "name",
+                "type": "string",
+                "required": False,
                 "multiple": False,
-                "description": "Layer to modify; it must already exist.",
+                "deprecated": True,
+                "description": "Singular alias for --names, kept for compatibility.",
+            },
+            {
+                "name": "continue-on-error",
+                "type": "boolean",
+                "required": False,
+                "multiple": False,
+                "description": (
+                    "Default true. False stops at the first target that cannot "
+                    "be applied and reports the rest as skipped."
+                ),
             },
             {
                 "name": "color",
@@ -389,10 +404,15 @@ COMMANDS: list[dict[str, Any]] = [
             },
         ],
         "output_schema": "layer_set",
+        # A dry-run answers in a different shape from a confirm, so the preview
+        # schema is named rather than left for an agent to discover by running.
+        "dry_run_output_schema": "layer_set_preview",
         "examples": [
-            f'{TOOL} layer set --file "bracket.dwg" --name DIMS --color 3 --dry-run --compact',
-            f'{TOOL} layer set --file "bracket.dwg" --name DIMS --color 3'
+            f'{TOOL} layer set --file "bracket.dwg" --names DIMS --color 3 --dry-run --compact',
+            f'{TOOL} layer set --file "bracket.dwg" --names DIMS --color 3'
             " --confirm <confirm_token> --compact",
+            f'{TOOL} layer set --file "bracket.dwg" --names XREF-A,XREF-B --off'
+            " --dry-run --compact",
         ],
     },
 ]
@@ -488,6 +508,23 @@ def require_file(flags: list[str]) -> Path:
     if not target.is_file():
         raise autocad.EngineError("E_NOT_FOUND", "drawing file does not exist", file=str(target))
     return target
+
+
+def take_list(flags: list[str], *names: str) -> list[str]:
+    """Collect a plural argument given comma-separated, repeated, or both.
+
+    `--names a,b --names c` and `--names a,b,c` are the same request
+    (CLI-SPEC section 15.1). Accepting a singular alias here is what lets a
+    one-item call stay identical in shape to a batch.
+    """
+    collected: list[str] = []
+    for flag in names:
+        while flag in flags:
+            value = take_value(flags, flag)
+            if value is None:
+                break
+            collected.extend(part.strip() for part in value.split(",") if part.strip())
+    return collected
 
 
 def take_boolean(flags: list[str], flag: str) -> bool:
@@ -714,26 +751,36 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         return emit_ok(drawing.xrefs(target), options, timer)
     if name == "layer set":
         target = require_file(flags)
-        layer = take_value(flags, "--name")
-        if layer is None:
-            raise UsageError("--name is required", flag="--name")
+        # `--name` is the deprecated singular alias kept for compatibility; both
+        # feed the same plural path so there is only one code path to test.
+        wanted = take_list(flags, "--names", "--name")
+        if not wanted:
+            raise UsageError("--names is required", flag="--names")
         colour = take_int(flags, "--color")
         on = take_switch(flags, "--on", "--off")
         frozen = take_switch(flags, "--freeze", "--thaw")
         locked = take_switch(flags, "--lock", "--unlock")
         dry_run = take_boolean(flags, "--dry-run")
         token = take_value(flags, "--confirm")
+        keep_going = take_value(flags, "--continue-on-error")
+        if keep_going is not None and keep_going not in ("true", "false"):
+            raise UsageError(
+                "--continue-on-error must be true or false",
+                flag="--continue-on-error",
+                got=keep_going,
+            )
         reject_unknown(flags)
         return emit_ok(
-            drawing.set_layer(
+            drawing.set_layers(
                 target,
-                layer,
+                wanted,
                 color=colour,
                 on=on,
                 frozen=frozen,
                 locked=locked,
                 dry_run=dry_run,
                 confirm_token=token,
+                continue_on_error=keep_going != "false",
             ),
             options,
             timer,

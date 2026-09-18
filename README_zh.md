@@ -23,12 +23,11 @@
 > 面向 AI Agent 的 Autodesk AutoCAD 图纸自动化 CLI。
 
 > [!WARNING]
-> **只读，且尚未发布到 npm。** 七条命令 —— `drawing info`、`layer list`、
-> `entity summary`、`block list`、`text extract`、`layout list`、`xref list`
-> —— 已能通过无头核心引擎读取真实 AutoCAD 图纸；**完全没有写入路径**。`reference` 报
-> `release_readiness.level: unpublishable`，`doctor` 的 `release_readiness` 检查
-> 故意为 fail。下文凡是涉及写操作或已安装包的部分都是目标形态 —— 实际存在的命令集
-> 以 `reference` 为准。包发布前请从源码运行：
+> **尚未发布到 npm。** 七条读命令 + 一条写命令，均已对真实 AutoCAD 安装通过无头
+> 核心引擎验证。**写操作默认被拒**，需要人手在该机器上开启；而且目前只有
+> `layer set` 一条 —— 几何、块、文字、导出都还没实现。`reference` 报
+> `release_readiness.level: unpublishable`，`doctor` 的 `release_readiness`
+> 检查故意为 fail。实际存在的命令集以 `reference` 为准。包发布前请从源码运行：
 > `python -m auto_cad_cli.main reference --compact`。
 
 ## Agent 安装
@@ -70,7 +69,7 @@ PowerShell 使用 `$env:NAME = "value"` 设置同样的环境变量。真实密�
 | 文字 | `text extract` | TEXT/MTEXT/ATTDEF 内容，含图层与插入点。 |
 | 图纸 | `layout list` | 布局，含图幅、打印设备与比例。 |
 | 外部参照 | `xref list` | 外部参照及其文件是否真实存在。 |
-| 图层修改 | `layer set` | **写操作。** 颜色与 开/冻结/锁定 状态，走确认门禁。 |
+| 图层修改 | `layer set` | **写操作。** 颜色与 开/冻结/锁定 状态，支持批量，走确认门禁。 |
 | 自描述 | `reference`, `context`, `doctor`, `changelog`, `update` | 用实时能力和版本变化引导 Agent。 |
 
 README 只做地图，不做完整手册。Agent 在执行任务命令前，应调用 `auto-cad-cli reference --compact` 获取准确的 flags、schemas、权限、退出码和错误码。

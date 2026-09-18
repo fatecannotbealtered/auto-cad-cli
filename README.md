@@ -23,15 +23,14 @@
 > Agent-native CLI for Autodesk AutoCAD drawing automation.
 
 > [!WARNING]
-> **Read-only, and not published to npm yet.** Seven commands — `drawing info`,
-> `layer list`, `entity summary`, `block list`, `text extract`, `layout list`,
-> `xref list` — work against a real AutoCAD install through the headless core
-> engine; there is **no write path at all**. `reference` reports
-> `release_readiness.level: unpublishable` and `doctor` fails its
-> `release_readiness` check, by design. Everything below that implies writes or
-> an installed package describes the target shape — run `reference` for the
-> command set that actually exists. Until the package ships, run it from a
-> checkout: `python -m auto_cad_cli.main reference --compact`.
+> **Not published to npm yet.** Seven read commands and one write command work
+> against a real AutoCAD install through the headless core engine. Writes are
+> refused until a human enables them on that machine, and only `layer set`
+> exists — geometry, blocks, text and export are not implemented. `reference`
+> reports `release_readiness.level: unpublishable` and `doctor` fails its
+> `release_readiness` check, by design. Run `reference` for the command set that
+> actually exists. Until the package ships, run it from a checkout:
+> `python -m auto_cad_cli.main reference --compact`.
 
 ## Agent Install
 
@@ -72,7 +71,7 @@ Worst-case risk tier: **T1** - it writes drawing files and drives a licensed Aut
 | Text | `text extract` | TEXT/MTEXT/ATTDEF strings with layer and position. |
 | Sheets | `layout list` | Layouts with paper size, plot device and scale. |
 | Xrefs | `xref list` | External references and whether their files exist. |
-| Layer edit | `layer set` | **Write.** Colour and on/frozen/locked state, behind the confirm gate. |
+| Layer edit | `layer set` | **Write.** Colour and on/frozen/locked state, one or many layers, behind the confirm gate. |
 | Self-description | `reference`, `context`, `doctor`, `changelog`, `update` | Bootstrap an Agent with live capabilities and version deltas. |
 
 The README is intentionally a map, not the full manual. Agents should call `auto-cad-cli reference --compact` for exact flags, schemas, permissions, exit codes, and error codes before executing task commands.

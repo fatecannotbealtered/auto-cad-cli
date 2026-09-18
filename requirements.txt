@@ -1,0 +1,5 @@
+# No third-party runtime dependencies on purpose. The contract core is stdlib
+# only, so the tool can report `context` and `doctor` before anything else is
+# installed. AutoCAD is driven through the operator's own licensed install, and
+# whichever channel that turns out to be (accoreconsole, COM, or a DXF reader)
+# is added here when the first drawing command lands.

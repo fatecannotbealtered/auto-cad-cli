@@ -1,0 +1,48 @@
+{
+  "name": "@fateforge/auto-cad-cli",
+  "version": "0.1.0",
+  "description": "A CLI for AI agents to operate Autodesk AutoCAD — drawing and layer inspection, entity queries and typed edits, block and attribute handling, layout setup, and DWG/DXF/PDF output. Guarded writes with read-back verification and structured output, built for LLM tool use.",
+  "license": "MIT",
+  "author": "Sean Guo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fatecannotbealtered/auto-cad-cli.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "auto-cad-cli": "scripts/run.js"
+  },
+  "scripts": {
+    "version": "node scripts/sync-version.js",
+    "check-version": "node scripts/check-version.js"
+  },
+  "optionalDependencies": {
+    "@fateforge/auto-cad-cli-darwin-arm64": "0.1.0",
+    "@fateforge/auto-cad-cli-darwin-x64": "0.1.0",
+    "@fateforge/auto-cad-cli-linux-arm64": "0.1.0",
+    "@fateforge/auto-cad-cli-linux-x64": "0.1.0",
+    "@fateforge/auto-cad-cli-win32-arm64": "0.1.0",
+    "@fateforge/auto-cad-cli-win32-x64": "0.1.0"
+  },
+  "files": [
+    "scripts/run.js",
+    "skills/",
+    "README.md",
+    "README_zh.md",
+    "*_zh.md",
+    "LICENSE",
+    "NOTICE.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "AGENTS.md",
+    ".agent/",
+    "docs/"
+  ],
+  "engines": {
+    "node": ">=16"
+  }
+}

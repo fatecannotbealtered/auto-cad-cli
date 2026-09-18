@@ -1,0 +1,39 @@
+# Common base — concatenate with template/<lang>/.gitignore
+
+node_modules/
+.env
+.env.local
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.claude/
+# Python-specific — append to common/.gitignore
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Packaging / build artifacts
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test / coverage / lint caches
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# PyInstaller
+*.spec
+*.manifest

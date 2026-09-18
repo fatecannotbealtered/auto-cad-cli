@@ -1,0 +1,225 @@
+# Release workflow for the Python flavour of auto-cad-cli.
+#
+# Triggered by a semver tag (v*.*.*). Builds a single-file PyInstaller binary
+# per OS/arch, merges per-platform checksums into one checksums.txt, signs it
+# with Sigstore/Cosign keyless signing, attaches everything to a GitHub
+# Release, then publishes the npm wrapper plus every platform package with
+# npm provenance.
+#
+# Placeholders (see SHARED PLACEHOLDER DICTIONARY in template/INSTANTIATE.md):
+#   auto-cad-cli kebab-case CLI/binary/repo name, e.g. my-cli
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # PyInstaller binaries are not cross-compiled: one runner per OS/arch.
+        # macos-15-intel = darwin-amd64 (macos-13 retired 2025-12), macos-14 =
+        # darwin-arm64 (Apple Silicon),
+        # ubuntu-24.04-arm = linux-arm64. win32-arm64 reuses the amd64 binary
+        # via Windows x64 emulation (see prepare-npm-platform-packages.js).
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-14, windows-2022]
+        python-version: ["3.12"]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest tests/ -q
+
+      # SEC-SPEC §5: the release path gates on the same dependency audit the
+      # merge path does. Without this, a CVE published after the last green run
+      # on main ships: this job re-runs the tests at tag time but never asked
+      # whether the code it is about to sign has a known vulnerability. A
+      # release blocked by a fresh upstream advisory is the intended outcome.
+      - name: Audit Python dependencies
+        if: runner.os == 'Linux'
+        run: pip-audit -r requirements.txt
+
+      # REPO-SPEC §5c: refuse to publish a binary whose vendored spec or
+      # generated contract module has drifted from the pinned tag. ruff comes
+      # from the dev extra installed above, which gen-contract.js needs.
+      - uses: actions/setup-node@v7
+        if: runner.os == 'Linux'
+        with:
+          node-version: "20"
+
+      - name: Verify spec/contract sync
+        if: runner.os == 'Linux'
+        run: node scripts/check-spec.js --local-only
+
+      - name: Build binary
+        run: python build.py
+
+      - name: Package release archive
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $platformMap = @{
+            "Linux" = "linux"
+            "macOS" = "darwin"
+            "Windows" = "windows"
+          }
+          $platform = $platformMap["${{ runner.os }}"]
+          $arch = if ("${{ runner.arch }}" -eq "ARM64") { "arm64" } else { "amd64" }
+          $base = "auto-cad-cli-$version-$platform-$arch"
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          if ("${{ runner.os }}" -eq "Windows") {
+            Copy-Item dist/auto-cad-cli.exe release/auto-cad-cli.exe
+            Compress-Archive -Path release/auto-cad-cli.exe -DestinationPath "release/$base.zip" -Force
+            $hash = (Get-FileHash "release/$base.zip" -Algorithm SHA256).Hash.ToLower()
+            "$hash  $base.zip" | Out-File -Encoding utf8 "release/checksums-$platform-$arch.txt"
+          } else {
+            Copy-Item dist/auto-cad-cli release/auto-cad-cli
+            tar -C release -czf "release/$base.tar.gz" auto-cad-cli
+            $hash = (Get-FileHash "release/$base.tar.gz" -Algorithm SHA256).Hash.ToLower()
+            "$hash  $base.tar.gz" | Out-File -Encoding utf8 "release/checksums-$platform-$arch.txt"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: "auto-cad-cli-${{ matrix.os }}"
+          path: release/*
+
+  release:
+    name: Publish release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-dist
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find release-dist -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+          find release-dist -type f -name "checksums-*.txt" -exec cat {} \; > release/checksums.txt
+          test -s release/checksums.txt
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums
+        shell: bash
+        run: cosign sign-blob --new-bundle-format --bundle release/checksums.txt.sigstore.json release/checksums.txt --yes
+
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Slice the '## [VERSION]' section out of CHANGELOG.md for this tag (awk: portable).
+          awk -v ver="$VERSION" '
+            /^## \[/ { if (found) exit; if (index($0, "[" ver "]")) found=1 }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          # Defensive fallback: if the slice is empty, point at the changelog.
+          if [ ! -s release-notes.md ]; then
+            printf '## v%s\n\nSee [CHANGELOG.md](CHANGELOG.md) for details.\n' "$VERSION" > release-notes.md
+          fi
+
+      - name: Upload GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: release-notes.md
+
+  publish-npm:
+    name: Publish to npm
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          always-auth: true
+
+      - name: Verify version consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version (${TAG_VERSION}) does not match package.json version (${PKG_VERSION})"
+            exit 1
+          fi
+          # Extend the guard to every derived location (SKILL.md, __version__,
+          # lockfile pins, optionalDependencies, CHANGELOG), not just package.json.
+          node scripts/check-version.js
+
+      - name: Download release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${GITHUB_REF_NAME}" --dir dist --pattern "*.tar.gz" --pattern "*.zip"
+          find dist -type f \( -name "*.tar.gz" -o -name "*.zip" \) -print
+
+      - name: Prepare npm platform packages
+        run: node scripts/prepare-npm-platform-packages.js dist npm-platform
+
+      - name: Publish to npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          ROOT_PKG=$(node -p "require('./package.json').name")
+
+          for dir in npm-platform/*; do
+            [ -d "$dir" ] || continue
+            PKG=$(node -p "require('./${dir}/package.json').name")
+            if npm view "${PKG}@${VERSION}" version 2>/dev/null | grep -qx "${VERSION}"; then
+              echo "npm package ${PKG}@${VERSION} already published; skipping"
+              continue
+            fi
+            npm publish "./$dir" --access public --provenance
+          done
+
+          if npm view "${ROOT_PKG}@${VERSION}" version 2>/dev/null | grep -qx "${VERSION}"; then
+            echo "npm package ${ROOT_PKG}@${VERSION} already published; skipping"
+            exit 0
+          fi
+          # Keep platform pins in lockstep with the package version (single
+          # source of truth): rewrite optionalDependencies to the published
+          # version so an npm install never resolves a stale platform binary.
+          node -e "const fs=require('fs'),p=require('./package.json');for(const k in (p.optionalDependencies||{}))p.optionalDependencies[k]=p.version;fs.writeFileSync('./package.json',JSON.stringify(p,null,2)+String.fromCharCode(10))"
+          npm publish --access public --provenance

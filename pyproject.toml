@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-cad-cli"
+version = "0.1.0"
+description = "AI-native Autodesk AutoCAD CLI - drawing and layer inspection, typed edits, block and attribute handling, and DWG/DXF/PDF output"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sean Guo" }]
+keywords = ["autocad", "dwg", "dxf", "cad", "cli", "ai-native", "agent"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Computer Aided Design (CAD)",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "pip-audit>=2.7", "pyinstaller>=6.6"]
+
+[project.scripts]
+auto-cad-cli = "auto_cad_cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/fatecannotbealtered/auto-cad-cli"
+Changelog = "https://github.com/fatecannotbealtered/auto-cad-cli/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+include = ["auto_cad_cli*"]

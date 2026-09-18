@@ -100,8 +100,10 @@ Use `--compact` when storing output in context or piping between tools.
 
 ## Write Recipe
 
-Seven writes exist: `layer set`, `layer create`, `layer delete`, `draw line`,
-`draw circle`, `draw text` and `draw polyline`. Every other command opens the drawing `/readonly` in a separate
+Eight writes exist: `layer set`, `layer create`, `layer delete`, `draw line`,
+`draw circle`, `draw text`, `draw polyline` and `export dxf`. Export creates a
+new file and never touches the source, but it still needs write permission
+because it writes to the operator's filesystem. There is no PDF export. Every other command opens the drawing `/readonly` in a separate
 headless process and cannot modify anything.
 
 To draw: create the layer first (`draw` refuses an unknown layer), then add

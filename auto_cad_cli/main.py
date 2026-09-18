@@ -49,6 +49,7 @@ Write commands (need write permission, then --dry-run -> --confirm):
   draw circle --file <dwg> --layer <L> --circles cx,cy,r [--circles ...]
   draw text --file <dwg> --layer <L> --texts "x,y,height,content" [--texts ...]
   draw polyline --file <dwg> --layer <L> --polylines x1,y1,x2,y2,...[:closed]
+  export dxf --file <dwg> --out <path.dxf> [--dxf-version 2018] [--overwrite]
 
   reference [--command <path>]   Declared capabilities, schemas and error codes
   context                        Runtime environment, configuration, credentials
@@ -76,7 +77,7 @@ RELEASE_READINESS = {
     "live_smoke_required_for_stable": True,
     "live_smoke_status": "missing",
     "reason": (
-        "Read commands and seven gated write commands, including geometry "
+        "Read commands and eight gated write commands, including geometry "
         "creation, run against a real AutoCAD install through the headless core "
         "engine. Still unpublishable: no mock-upstream contract suite, no "
         "recorded live smoke evidence, and geometry is verified by counting "
@@ -172,6 +173,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "shape": "object",
         "fields": ["items", "summary", "layer", "verification", "backup", "backup_note"],
         "untrusted_fields": ["items", "layer"],
+    },
+    "export_result": {
+        "shape": "object",
+        "fields": ["out", "written", "bytes", "version", "precision", "verification"],
+        "untrusted_fields": [],
     },
     "xref_list": {
         "shape": "object",
@@ -488,6 +494,59 @@ COMMANDS: list[dict[str, Any]] = [
             " --polylines 0,0,120,0,120,80,0,80:closed --dry-run --compact",
             f'{TOOL} draw polyline --file "bracket.dwg" --layer OUTLINE'
             " --polylines 0,0,120,0,120,80,0,80:closed --confirm <confirm_token> --compact",
+        ],
+    },
+    {
+        "path": "export dxf",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Write the drawing out as DXF. The source is opened read-only and "
+            "cannot be altered - the result reports its digest before and after "
+            "to show that. Refuses to replace an existing file unless "
+            "--overwrite. PDF is not supported: the core engine accepts a .pdf "
+            "filename and produces nothing."
+        ),
+        "params": [
+            FILE_PARAM,
+            {
+                "name": "out",
+                "type": "string",
+                "required": True,
+                "multiple": False,
+                "description": "Destination path; must end in .dxf.",
+            },
+            {
+                "name": "dxf-version",
+                "type": "string",
+                "required": False,
+                "multiple": False,
+                "description": (
+                    "DXF version: 2018 (default), 2013, 2010, 2007, 2004, 2000 or R12. "
+                    "Named dxf-version because --version is a global flag."
+                ),
+            },
+            {
+                "name": "precision",
+                "type": "integer",
+                "required": False,
+                "multiple": False,
+                "description": "Decimal places, 0..16. Default 6.",
+            },
+            {
+                "name": "overwrite",
+                "type": "boolean",
+                "required": False,
+                "multiple": False,
+                "description": "Allow replacing an existing output file.",
+            },
+        ],
+        "output_schema": "export_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} export dxf --file "bracket.dwg" --out "out/bracket.dxf" --dry-run --compact',
+            f'{TOOL} export dxf --file "bracket.dwg" --out "out/bracket.dxf"'
+            " --confirm <confirm_token> --compact",
         ],
     },
     {
@@ -997,6 +1056,30 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         target = require_file(flags)
         reject_unknown(flags)
         return emit_ok(drawing.xrefs(target), options, timer)
+    if name == "export dxf":
+        target = require_file(flags)
+        out = take_value(flags, "--out")
+        if out is None:
+            raise UsageError("--out is required", flag="--out")
+        version = take_value(flags, "--dxf-version")
+        precision = take_int(flags, "--precision")
+        overwrite = take_boolean(flags, "--overwrite")
+        dry_run = take_boolean(flags, "--dry-run")
+        token = take_value(flags, "--confirm")
+        reject_unknown(flags)
+        return emit_ok(
+            drawing.export_dxf(
+                target,
+                Path(out).expanduser(),
+                version=version or "2018",
+                precision=6 if precision is None else precision,
+                overwrite=overwrite,
+                dry_run=dry_run,
+                confirm_token=token,
+            ),
+            options,
+            timer,
+        )
     if name.startswith("draw ") and name.split()[1] in drawing.DRAW_FLAGS:
         target = require_file(flags)
         layer = take_value(flags, "--layer")

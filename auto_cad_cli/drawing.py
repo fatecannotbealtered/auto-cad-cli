@@ -1478,3 +1478,146 @@ DRAW_DXF_TYPES = {
     "text": "TEXT",
     "polyline": "LWPOLYLINE",
 }
+
+
+# DXF versions `DXFOUT` accepts, newest first. R12 is kept because it is still
+# what some CAM and laser-cutting software will take.
+DXF_VERSIONS = ("2018", "2013", "2010", "2007", "2004", "2000", "R12")
+
+
+def _export_body(destination: Path, version: str, precision: int) -> str:
+    """Write a DXF through `DXFOUT`.
+
+    Forward slashes are not cosmetic. AutoCAD's command-line *file* prompt eats
+    backslashes out of a string handed to `(command ...)`: asking for
+    `D:\\work\\out.dxf` silently produced `D:workout.dxf` in the working
+    directory instead. The file was real and complete - just not where anyone
+    asked for it, which is the worst way for this to go wrong.
+    """
+    target = str(destination).replace("\\", "/")
+    return "\n".join(
+        [
+            f'(command "_.DXFOUT" "{_lisp_string(target)}" "_V" "{version}" {precision})',
+            '(write-line "exported|attempted" f)',
+            "",
+        ]
+    )
+
+
+def export_dxf(
+    drawing: Path,
+    destination: Path,
+    *,
+    version: str = "2018",
+    precision: int = 6,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Write the drawing out as DXF.
+
+    The source is opened `/readonly`, so this physically cannot alter it - the
+    result reports the source digest before and after to show that rather than
+    asserting it. It still needs write permission, because it creates a file on
+    the operator's machine and that is the one thing the permission gate governs.
+
+    PDF is deliberately absent. `EXPORT` accepts a .pdf filename in the core
+    console and produces nothing; a real PDF needs `-PLOT` and a dozen
+    locale-sensitive prompts, which is exactly the shape of thing this codebase
+    refuses to build on.
+    """
+    confirm.require_write_permission()
+
+    if version not in DXF_VERSIONS:
+        raise autocad.EngineError(
+            "E_VALIDATION", f"unknown DXF version {version!r}", supported=list(DXF_VERSIONS)
+        )
+    if not 0 <= precision <= 16:
+        raise autocad.EngineError(
+            "E_VALIDATION", "--precision must be between 0 and 16", got=precision
+        )
+    if destination.suffix.lower() != ".dxf":
+        raise autocad.EngineError("E_VALIDATION", "--out must end in .dxf", got=str(destination))
+    if destination.exists() and not overwrite:
+        raise autocad.EngineError(
+            "E_CONFLICT",
+            "the output file already exists; pass --overwrite to replace it",
+            out=str(destination),
+        )
+    if not destination.parent.is_dir():
+        raise autocad.EngineError(
+            "E_NOT_FOUND", "the output directory does not exist", directory=str(destination.parent)
+        )
+
+    source_digest = confirm.file_digest(drawing)
+    scope = confirm.scope(
+        command="export dxf",
+        target=drawing,
+        arguments={
+            "out": str(destination.resolve()),
+            "version": version,
+            "precision": precision,
+            "overwrite": overwrite,
+        },
+        observed={"destination_exists": destination.exists()},
+    )
+
+    if dry_run:
+        token = confirm.mint(scope)
+        return {
+            "preview": {
+                "action": "export",
+                "resource": "dxf",
+                "total": 1,
+                "changes": [
+                    {
+                        "action": "create",
+                        "resource": "dxf",
+                        "id": str(destination),
+                        "before": None,
+                        "after": {"version": version, "precision": precision},
+                    }
+                ],
+                "replaces_existing": destination.exists(),
+                "source_read_only": True,
+            },
+            "confirm_token": token.value,
+            "expires_at": token.expires_at,
+            "_untrusted": ["preview"],
+        }
+
+    if confirm_token is None:
+        raise autocad.EngineError(
+            "E_CONFIRMATION_REQUIRED",
+            "run the same command with --dry-run to obtain a confirm token",
+        )
+    confirm.verify_and_consume(confirm_token, scope)
+
+    autocad.run_script(
+        _export_body(destination, version, precision),
+        drawing=drawing,
+        # The source is never opened for writing, so an export cannot damage it.
+        readonly=True,
+        timeout=timeout,
+    )
+
+    # DXFOUT reports nothing useful, and a mangled path lands the file somewhere
+    # else entirely, so the only honest check is whether the file we asked for
+    # now exists.
+    written = destination.is_file()
+    size = destination.stat().st_size if written else 0
+    return {
+        "out": str(destination),
+        "written": written,
+        "bytes": size,
+        "version": version,
+        "precision": precision,
+        "verification": {
+            "level": "output-file-checked",
+            "exists": written,
+            "non_empty": size > 0,
+            "source_unchanged": confirm.file_digest(drawing) == source_digest,
+        },
+        "_untrusted": [],
+    }

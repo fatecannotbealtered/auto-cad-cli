@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layer 0, the current layer and any layer holding objects cannot be deleted -
   because AutoCAD's own delete reports refusal and success identically.
 
+- `export dxf`: write the drawing out as DXF, 2018 back to R12. The source is
+  opened `/readonly` so an export physically cannot alter it, and the result
+  reports the source digest before and after rather than asserting it. Refuses
+  to replace an existing file without `--overwrite`. PDF is deliberately absent:
+  the core engine accepts a .pdf filename from `EXPORT` and produces nothing,
+  and a real PDF needs `-PLOT` with a dozen locale-sensitive prompts.
 - `draw text` and `draw polyline` round out the geometry set. A text value is
   `x,y,height,content` where the content is everything after the third comma, so
   a label may contain commas without the caller needing an escape rule; a

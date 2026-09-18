@@ -628,3 +628,66 @@ def test_every_draw_shape_is_declared_with_its_own_flag():
         command = commands[f"draw {kind}"]
         assert command["type"] == "write"
         assert any(param["name"] == flag.lstrip("-") for param in command["params"]), kind
+
+
+# --- export -------------------------------------------------------------------
+
+
+def test_export_rejects_a_non_dxf_destination(writable, target, tmp_path):
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.export_dxf(target, tmp_path / "out.pdf", dry_run=True)
+    assert caught.value.code == "E_VALIDATION"
+
+
+def test_export_rejects_an_unknown_dxf_version(writable, target, tmp_path):
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.export_dxf(target, tmp_path / "out.dxf", version="9999", dry_run=True)
+    assert caught.value.code == "E_VALIDATION"
+
+
+def test_export_refuses_to_replace_without_overwrite(writable, target, tmp_path):
+    existing = tmp_path / "out.dxf"
+    existing.write_bytes(b"previous export")
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.export_dxf(target, existing, dry_run=True)
+    assert caught.value.code == "E_CONFLICT"
+    drawing.export_dxf(target, existing, overwrite=True, dry_run=True)
+
+
+def test_export_reports_a_missing_output_directory(writable, target, tmp_path):
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.export_dxf(target, tmp_path / "nope" / "out.dxf", dry_run=True)
+    assert caught.value.code == "E_NOT_FOUND"
+
+
+def test_export_flag_does_not_collide_with_the_global_version_flag():
+    """`--version` is global; the export parameter must not shadow it.
+
+    It did. `export dxf --version 2018` returned the tool version and never
+    exported anything, and the validation that should have caught a bogus
+    version never ran.
+    """
+    code, stdout = run("reference", "--command", "export dxf", "--compact")
+    command = json.loads(stdout)["data"]["commands"][0]
+    names = {param["name"] for param in command["params"]}
+    assert "dxf-version" in names
+    assert "version" not in names
+
+
+@needs_autocad
+def test_export_writes_a_dxf_without_touching_the_source(writable, tmp_path):
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    before = confirm.file_digest(work)
+    destination = tmp_path / "out.dxf"
+
+    preview = drawing.export_dxf(work, destination, dry_run=True)
+    assert preview["preview"]["source_read_only"] is True
+
+    result = drawing.export_dxf(work, destination, confirm_token=preview["confirm_token"])
+    assert result["written"] is True
+    assert result["bytes"] > 0
+    assert result["verification"]["source_unchanged"] is True
+    assert confirm.file_digest(work) == before
+    # The file is where it was asked for, not where a mangled path would put it.
+    assert destination.is_file()

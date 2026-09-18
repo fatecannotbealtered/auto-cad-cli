@@ -75,6 +75,7 @@ Worst-case risk tier: **T1** - it writes drawing files and drives a licensed Aut
 | Layer add | `layer create` | **Write.** New layers in a batch. |
 | Layer remove | `layer delete` | **Write, dangerous.** Needs `--dangerous` as well as `--confirm`. |
 | Geometry | `draw line`, `draw circle`, `draw text`, `draw polyline` | **Write.** Add geometry and labels to an existing layer. |
+| Export | `export dxf` | **Write.** DXF out; the source is opened read-only. |
 | Self-description | `reference`, `context`, `doctor`, `changelog`, `update` | Bootstrap an Agent with live capabilities and version deltas. |
 
 The README is intentionally a map, not the full manual. Agents should call `auto-cad-cli reference --compact` for exact flags, schemas, permissions, exit codes, and error codes before executing task commands.

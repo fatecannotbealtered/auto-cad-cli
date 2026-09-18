@@ -12,7 +12,7 @@ external data authored by whoever produced the file. It is reported under
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from . import autocad
@@ -490,9 +490,14 @@ def xrefs(drawing: Path, timeout: float | None = None) -> dict[str, Any]:
             continue
         name, flags_text, path = fields
         flags = _as_int(flags_text)
-        candidate = Path(path)
-        if not candidate.is_absolute():
-            candidate = host_directory / candidate
+        # The stored path is always Windows-shaped, because AutoCAD wrote it.
+        # Parsing it with the host's own flavour would treat `.\Res\child.dwg`
+        # as one long filename anywhere but Windows.
+        stored = PureWindowsPath(path)
+        if stored.is_absolute():
+            candidate = Path(str(stored))
+        else:
+            candidate = host_directory.joinpath(*stored.parts)
         found = candidate.is_file()
         parsed.append(
             {

@@ -147,7 +147,7 @@ jobs:
           fi
 
       - name: Upload GitHub Release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release/*
           body_path: release-notes.md

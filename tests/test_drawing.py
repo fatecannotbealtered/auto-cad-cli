@@ -124,17 +124,29 @@ def test_unrepresentable_script_characters_fail_instead_of_hanging(tmp_path):
     assert caught.value.code == "E_CONFIG"
 
 
-def test_records_decode_from_the_system_codepage():
-    """AutoLISP `write-line` emits system-codepage bytes, not UTF-8."""
+def test_records_decode_from_the_system_codepage(tmp_path):
+    """AutoLISP `write-line` emits system-codepage bytes, not UTF-8.
+
+    The sample name is chosen from what *this* machine's codepage can encode.
+    Hardcoding a Chinese name passed on the zh-CN box it was written on and
+    failed on the cp1252 CI runner - the same locale assumption the production
+    fix exists to remove.
+    """
     if os.name != "nt":
         pytest.skip("mbcs round-trip is a Windows behaviour")
-    path = Path(os.environ["TEMP"]) / "auto-cad-cli-record-probe.txt"
-    body = "BEGIN_RECORDS\r\nlayer|机械-轮廓\r\nEND_RECORDS\r\n"
-    path.write_bytes(body.encode("mbcs"))
-    try:
-        assert autocad._read_records(path) == [("layer", "机械-轮廓")]
-    finally:
-        path.unlink(missing_ok=True)
+
+    for sample in ("机械-轮廓", "Ölschicht", "café"):
+        try:
+            encoded = f"BEGIN_RECORDS\r\nlayer|{sample}\r\nEND_RECORDS\r\n".encode("mbcs")
+        except UnicodeEncodeError:
+            continue
+        break
+    else:
+        pytest.skip("this machine's codepage encodes none of the sample names")
+
+    path = tmp_path / "records.txt"
+    path.write_bytes(encoded)
+    assert autocad._read_records(path) == [("layer", sample)]
 
 
 # --- the untrusted marker (no engine) ----------------------------------------

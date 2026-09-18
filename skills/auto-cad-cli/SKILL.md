@@ -100,8 +100,14 @@ Use `--compact` when storing output in context or piping between tools.
 
 ## Write Recipe
 
-`layer set` is the only write. Every other command opens the drawing
-`/readonly` in a separate headless process and cannot modify anything.
+Three writes exist: `layer set`, `layer create` and `layer delete`. Every other
+command opens the drawing `/readonly` in a separate headless process and cannot
+modify anything.
+
+`layer delete` is **dangerous** and needs `--dangerous` in addition to
+`--confirm`. STOP CHECKPOINT: ask the user before deleting anything, and quote
+the dry-run's `blocked` map to them — it says which targets AutoCAD will refuse
+and why.
 
 ```bash
 auto-cad-cli layer set --file <dwg> --names <a,b,c> --color 3 --dry-run --compact

@@ -640,6 +640,30 @@ def _encode(state: dict[str, Any]) -> tuple[int, int]:
     return color, flags
 
 
+def _batch_result(
+    items: list[dict[str, Any]], skipped: list[str], backup_path: Path | None
+) -> dict[str, Any]:
+    """The shape every batch write answers in (CLI-SPEC section 15.5).
+
+    Shared so `layer set`, `layer create` and `layer delete` cannot drift into
+    three slightly different notions of what a summary is.
+    """
+    succeeded = sum(1 for entry in items if entry["ok"])
+    summary = {"total": len(items), "succeeded": succeeded, "failed": len(items) - succeeded}
+    if skipped:
+        summary["skipped"] = len(skipped)
+    return {
+        "items": items,
+        "summary": summary,
+        "verification": {"level": "reopened-and-compared", "matches": summary["failed"] == 0},
+        "backup": str(backup_path) if backup_path else None,
+        "backup_note": (
+            "byte copy of the file as it was on disk; unsaved editor state is not covered"
+        ),
+        "_untrusted": ["items"],
+    }
+
+
 def set_layers(
     drawing: Path,
     names: list[str],
@@ -810,18 +834,369 @@ def set_layers(
             entry["error"] = {"code": "E_SERVER", "retryable": True}
         items.append(entry)
 
-    succeeded = sum(1 for entry in items if entry["ok"])
-    summary = {"total": len(items), "succeeded": succeeded, "failed": len(items) - succeeded}
-    if skipped:
-        summary["skipped"] = len(skipped)
+    return _batch_result(items, skipped, backup_path)
 
-    return {
-        "items": items,
-        "summary": summary,
-        "verification": {"level": "reopened-and-compared", "matches": summary["failed"] == 0},
-        "backup": str(backup_path) if backup_path else None,
-        "backup_note": (
-            "byte copy of the file as it was on disk; unsaved editor state is not covered"
-        ),
-        "_untrusted": ["items"],
-    }
+
+# Which layers hold objects, and which one is current. Both block a delete, so
+# the dry-run can say *why* a target will survive instead of finding out after.
+_LAYER_USAGE_BODY = """
+(setq counts '())
+(setq e (entnext))
+(while e
+  (setq ly (cdr (assoc 8 (entget e))))
+  (setq hit (assoc ly counts))
+  (if hit
+    (setq counts (subst (cons ly (1+ (cdr hit))) hit counts))
+    (setq counts (cons (cons ly 1) counts)))
+  (setq e (entnext e)))
+(foreach c counts
+  (write-line (strcat "usage|" (car c) "\\t" (itoa (cdr c))) f))
+(write-line (strcat "clayer|" (getvar "CLAYER")) f)
+"""
+
+# Layer "0" is structural; AutoCAD refuses to delete it and so do we, earlier
+# and with a better message.
+_PROTECTED_LAYERS = frozenset({"0"})
+
+
+def _layer_create_body(plan: list[tuple[str, int, int, str]]) -> str:
+    """`entmake` a layer table record per target, then save.
+
+    Creation is the one layer operation with a real return value: `entmake`
+    answers nil on failure, so the per-item outcome here is genuine rather than
+    inferred. Deletion has no such signal (see `_layer_delete_body`).
+    """
+    blocks = []
+    for name, color, flags, linetype in plan:
+        literal = _lisp_string(name)
+        blocks.append(
+            '(if (entmake (list \'(0 . "LAYER") \'(100 . "AcDbSymbolTableRecord")\n'
+            '                   \'(100 . "AcDbLayerTableRecord")\n'
+            f'                   (cons 2 "{literal}") (cons 70 {flags})\n'
+            f'                   (cons 62 {color}) (cons 6 "{_lisp_string(linetype)}")))\n'
+            f'  (write-line "created|{literal}\\tyes" f)\n'
+            f'  (write-line "created|{literal}\\tno" f))'
+        )
+    return "\n".join([*blocks, '(command "_.QSAVE")', ""])
+
+
+def _layer_delete_body(names: list[str]) -> str:
+    """Delete layer records through `-LAYER`, then save.
+
+    This is the second deliberate exception to the no-`command` rule, and it
+    needed proving before it could be trusted: the refusal paths are where a
+    prompt-driven command would hang. Deleting layer 0, the current layer, a
+    layer holding objects and a layer that does not exist were each measured on
+    a real drawing - all four return control in under four seconds.
+
+    What they do *not* do is report which of those happened. The command's
+    result is identical whether it deleted or refused, so the caller must
+    re-read the layer table to learn the truth.
+    """
+    lines = []
+    for name in names:
+        literal = _lisp_string(name)
+        lines.append(f'(command "_.-LAYER" "_Delete" "{literal}" "")')
+    return "\n".join([*lines, '(command "_.QSAVE")', '(write-line "attempted|yes" f)', ""])
+
+
+def _layer_usage(drawing: Path, timeout: float | None) -> tuple[dict[str, int], str]:
+    records = autocad.run_script(_LAYER_USAGE_BODY, drawing=drawing, readonly=True, timeout=timeout)
+    usage: dict[str, int] = {}
+    for key, value in records:
+        if key != "usage":
+            continue
+        name, _, count = value.partition("\t")
+        usage[name] = _as_int(count)
+    current = _first(records, "clayer")
+    if current is None:
+        raise autocad.EngineError(
+            "E_SERVER",
+            "the layer usage probe did not report the current layer",
+            reported=sorted({name for name, _ in records}),
+        )
+    return usage, current
+
+
+def create_layers(
+    drawing: Path,
+    names: list[str],
+    *,
+    color: int = 7,
+    linetype: str = "Continuous",
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    continue_on_error: bool = True,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Create one or more layers.
+
+    Additive and reversible, so it carries no `--dangerous` gate - but it is
+    still a write, and goes through permission, preview, token and read-back
+    like every other.
+    """
+    confirm.require_write_permission()
+    if not 1 <= color <= 255:
+        raise autocad.EngineError(
+            "E_VALIDATION", "--color must be an AutoCAD Color Index in 1..255", color=color
+        )
+
+    targets = _resolve_targets(names)
+    existing = {layer["name"] for layer in layers(drawing, timeout=timeout)["layers"]}
+
+    # Creating a layer that is already there is reported as a conflict rather
+    # than a quiet success: the caller asked for a layer with these properties,
+    # and the one that exists may have entirely different ones.
+    plan = [{"target": name, "exists": name in existing} for name in targets]
+    fresh = [item for item in plan if not item["exists"]]
+
+    scope = confirm.scope(
+        command="layer create",
+        target=drawing,
+        arguments={
+            "names": targets,
+            "color": color,
+            "linetype": linetype,
+            "continue_on_error": continue_on_error,
+        },
+        observed={"existing": sorted(existing & set(targets))},
+    )
+
+    if dry_run:
+        token = confirm.mint(scope)
+        return {
+            "preview": {
+                "action": "create",
+                "resource": "layer",
+                "total": len(targets),
+                "targets": targets,
+                "changes": [
+                    {
+                        "action": "create",
+                        "resource": "layer",
+                        "id": item["target"],
+                        "before": None,
+                        "after": {"color": color, "linetype": linetype},
+                    }
+                    for item in fresh
+                ],
+                "already_present": [item["target"] for item in plan if item["exists"]],
+            },
+            "confirm_token": token.value,
+            "expires_at": token.expires_at,
+            "_untrusted": ["preview"],
+        }
+
+    if confirm_token is None:
+        raise autocad.EngineError(
+            "E_CONFIRMATION_REQUIRED",
+            "run the same command with --dry-run to obtain a confirm token",
+        )
+    confirm.verify_and_consume(confirm_token, scope)
+
+    attempt, skipped = fresh, []
+    if not continue_on_error:
+        stop_at = next((index for index, item in enumerate(plan) if item["exists"]), None)
+        if stop_at is not None:
+            attempt = [item for item in plan[:stop_at] if not item["exists"]]
+            skipped = [item["target"] for item in plan[stop_at + 1 :]]
+
+    backup_path = confirm.backup(drawing) if attempt else None
+    outcomes: dict[str, str] = {}
+    if attempt:
+        records = autocad.run_script(
+            _layer_create_body([(item["target"], color, 0, linetype) for item in attempt]),
+            drawing=drawing,
+            readonly=False,
+            timeout=timeout,
+        )
+        for key, value in records:
+            if key != "created":
+                continue
+            name, _, outcome = value.partition("\t")
+            outcomes[name] = outcome
+
+    verified = {layer["name"]: layer for layer in layers(drawing, timeout=timeout)["layers"]}
+
+    items: list[dict[str, Any]] = []
+    for item in plan:
+        name = item["target"]
+        if item["exists"]:
+            items.append(
+                {
+                    "target": name,
+                    "ok": False,
+                    "error": {"code": "E_CONFLICT", "retryable": False},
+                    "reason": "a layer with that name already exists",
+                }
+            )
+            continue
+        if name in skipped or name not in outcomes:
+            items.append(
+                {
+                    "target": name,
+                    "ok": False,
+                    "skipped": True,
+                    "error": {"code": "E_CONFLICT", "retryable": True},
+                }
+            )
+            continue
+        present = verified.get(name)
+        entry: dict[str, Any] = {
+            "target": name,
+            "ok": outcomes[name] == "yes" and present is not None,
+            "after": present,
+        }
+        if not entry["ok"]:
+            entry["error"] = {"code": "E_SERVER", "retryable": True}
+        items.append(entry)
+
+    return _batch_result(items, skipped, backup_path)
+
+
+def delete_layers(
+    drawing: Path,
+    names: list[str],
+    *,
+    dangerous: bool = False,
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    continue_on_error: bool = True,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Delete one or more layers. Irreversible inside the file.
+
+    Two independent gates, per CLI-SPEC section 15.4: `--dangerous` declares the
+    intent, and the confirm token authorises the specific resolved set. Neither
+    alone will do anything - a valid token without `--dangerous` is still
+    refused.
+
+    The preview says which targets will survive and why, because AutoCAD refuses
+    to delete layer 0, the current layer, or a layer holding objects - and its
+    command reports refusal and success identically. The pre-check is advisory
+    (it does not see inside block definitions); the read-back afterwards is what
+    decides each item's outcome.
+    """
+    confirm.require_write_permission()
+
+    targets = _resolve_targets(names)
+    existing = {layer["name"] for layer in layers(drawing, timeout=timeout)["layers"]}
+    usage, current = _layer_usage(drawing, timeout)
+
+    def blocker(name: str) -> str | None:
+        if name not in existing:
+            return "no such layer"
+        if name in _PROTECTED_LAYERS:
+            return "layer 0 cannot be deleted"
+        if name == current:
+            return "layer is the current layer"
+        if usage.get(name):
+            return f"layer holds {usage[name]} object(s)"
+        return None
+
+    plan = [{"target": name, "blocked": blocker(name)} for name in targets]
+    removable = [item for item in plan if item["blocked"] is None]
+
+    scope = confirm.scope(
+        command="layer delete",
+        target=drawing,
+        arguments={"names": targets, "continue_on_error": continue_on_error},
+        observed={item["target"]: item["blocked"] for item in plan},
+    )
+
+    if dry_run:
+        token = confirm.mint(scope)
+        return {
+            "preview": {
+                "action": "delete",
+                "resource": "layer",
+                "total": len(targets),
+                "targets": targets,
+                "changes": [
+                    {
+                        "action": "delete",
+                        "resource": "layer",
+                        "id": item["target"],
+                        "before": {"name": item["target"]},
+                        "after": None,
+                    }
+                    for item in removable
+                ],
+                "blocked": {item["target"]: item["blocked"] for item in plan if item["blocked"]},
+                "requires": "--dangerous",
+            },
+            "confirm_token": token.value,
+            "expires_at": token.expires_at,
+            "_untrusted": ["preview"],
+        }
+
+    if confirm_token is None:
+        raise autocad.EngineError(
+            "E_CONFIRMATION_REQUIRED",
+            "run the same command with --dry-run to obtain a confirm token",
+        )
+    # Checked after the token so a caller cannot learn anything by omitting it,
+    # and before consuming the token so a forgotten flag does not burn one.
+    if not dangerous:
+        raise autocad.EngineError(
+            "E_CONFIRMATION_REQUIRED",
+            "deleting layers is irreversible: pass --dangerous as well as --confirm",
+            requires="--dangerous",
+        )
+    confirm.verify_and_consume(confirm_token, scope)
+
+    attempt, skipped = removable, []
+    if not continue_on_error:
+        stop_at = next((index for index, item in enumerate(plan) if item["blocked"]), None)
+        if stop_at is not None:
+            attempt = [item for item in plan[:stop_at] if item["blocked"] is None]
+            skipped = [item["target"] for item in plan[stop_at + 1 :]]
+
+    backup_path = confirm.backup(drawing) if attempt else None
+    if attempt:
+        autocad.run_script(
+            _layer_delete_body([item["target"] for item in attempt]),
+            drawing=drawing,
+            readonly=False,
+            timeout=timeout,
+        )
+
+    # The only trustworthy signal: is it gone from the reopened file?
+    remaining = {layer["name"] for layer in layers(drawing, timeout=timeout)["layers"]}
+
+    items: list[dict[str, Any]] = []
+    for item in plan:
+        name = item["target"]
+        if item["blocked"]:
+            items.append(
+                {
+                    "target": name,
+                    "ok": False,
+                    "error": {
+                        "code": "E_NOT_FOUND"
+                        if item["blocked"] == "no such layer"
+                        else "E_CONFLICT",
+                        "retryable": False,
+                    },
+                    "reason": item["blocked"],
+                }
+            )
+            continue
+        if name in skipped:
+            items.append(
+                {
+                    "target": name,
+                    "ok": False,
+                    "skipped": True,
+                    "error": {"code": "E_CONFLICT", "retryable": True},
+                }
+            )
+            continue
+        gone = name not in remaining
+        entry: dict[str, Any] = {"target": name, "ok": gone, "deleted": gone}
+        if not gone:
+            entry["error"] = {"code": "E_CONFLICT", "retryable": False}
+            entry["reason"] = "AutoCAD refused the delete; the layer is still referenced"
+        items.append(entry)
+
+    return _batch_result(items, skipped, backup_path)

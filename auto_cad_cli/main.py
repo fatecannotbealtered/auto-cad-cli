@@ -3,10 +3,10 @@
 Read commands are served by the headless core engine with `/readonly`, so they
 run without an AutoCAD window and cannot disturb one that is open.
 
-The single write command goes through the full gate: permission a human enabled,
+Write commands go through the full gate: permission a human enabled, a
 `--dry-run` preview, a single-use confirm token, a backup, and an independent
-read-back. `doctor` reports the permission state rather than leaving an agent to
-discover it by being refused.
+read-back. Irreversible ones need `--dangerous` on top. `doctor` reports the
+permission state rather than leaving an agent to discover it by being refused.
 """
 
 from __future__ import annotations
@@ -40,9 +40,11 @@ Read commands (the drawing is opened /readonly in a headless engine):
   layout list --file <dwg>       Sheets with paper size, plot device and scale
   xref list --file <dwg>         External references and whether their files exist
 
-Write command (needs write permission, then --dry-run -> --confirm):
+Write commands (need write permission, then --dry-run -> --confirm):
   layer set --file <dwg> --names <a,b,c> [--color N] [--on|--off]
             [--freeze|--thaw] [--lock|--unlock] [--continue-on-error false]
+  layer create --file <dwg> --names <a,b,c> [--color N] [--linetype X]
+  layer delete --file <dwg> --names <a,b,c> --dangerous   (irreversible)
 
   reference [--command <path>]   Declared capabilities, schemas and error codes
   context                        Runtime environment, configuration, credentials
@@ -155,7 +157,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "fields": ["items", "summary", "verification", "backup", "backup_note"],
         "untrusted_fields": ["items"],
     },
-    "layer_set_preview": {
+    "layer_batch_preview": {
         "shape": "object",
         "fields": ["preview", "confirm_token", "expires_at"],
         "untrusted_fields": ["preview"],
@@ -165,6 +167,25 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "fields": ["xrefs", "count", "missing_count", "missing"],
         "untrusted_fields": ["xrefs", "missing"],
     },
+}
+
+NAMES_PARAM = {
+    "name": "names",
+    "type": "string",
+    "required": True,
+    "multiple": True,
+    "description": "Layer names, comma-separated or repeated.",
+}
+
+CONTINUE_PARAM = {
+    "name": "continue-on-error",
+    "type": "boolean",
+    "required": False,
+    "multiple": False,
+    "description": (
+        "Default true. False stops at the first target that cannot be applied "
+        "and reports the rest as skipped."
+    ),
 }
 
 FILE_PARAM = {
@@ -332,6 +353,64 @@ COMMANDS: list[dict[str, Any]] = [
         ],
     },
     {
+        "path": "layer create",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Create one or more layers. Additive and reversible, so no "
+            "--dangerous gate, but it is still a write: permission, --dry-run "
+            "for a token, then --confirm. A name that already exists comes back "
+            "as that item's own E_CONFLICT rather than quietly succeeding."
+        ),
+        "params": [
+            FILE_PARAM,
+            NAMES_PARAM,
+            {
+                "name": "color",
+                "type": "integer",
+                "required": False,
+                "multiple": False,
+                "description": "AutoCAD Color Index for the new layers, 1..255. Default 7.",
+            },
+            {
+                "name": "linetype",
+                "type": "string",
+                "required": False,
+                "multiple": False,
+                "description": "Linetype name; it must already be loaded. Default Continuous.",
+            },
+            CONTINUE_PARAM,
+        ],
+        "output_schema": "layer_set",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} layer create --file "bracket.dwg" --names DIMS,NOTES --color 3'
+            " --dry-run --compact",
+            f'{TOOL} layer create --file "bracket.dwg" --names DIMS,NOTES --color 3'
+            " --confirm <confirm_token> --compact",
+        ],
+    },
+    {
+        "path": "layer delete",
+        "type": "write",
+        "dangerous": True,
+        "description": (
+            "Delete one or more layers. Irreversible inside the file, so it "
+            "needs two independent gates: --dangerous to declare the intent and "
+            "--confirm to authorise the resolved set. Layer 0, the current "
+            "layer and any layer holding objects cannot be deleted; the "
+            "dry-run says which and why."
+        ),
+        "params": [FILE_PARAM, NAMES_PARAM, CONTINUE_PARAM],
+        "output_schema": "layer_set",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} layer delete --file "bracket.dwg" --names OLD-NOTES --dry-run --compact',
+            f'{TOOL} layer delete --file "bracket.dwg" --names OLD-NOTES --dangerous'
+            " --confirm <confirm_token> --compact",
+        ],
+    },
+    {
         "path": "layer set",
         "type": "write",
         "dangerous": False,
@@ -406,7 +485,7 @@ COMMANDS: list[dict[str, Any]] = [
         "output_schema": "layer_set",
         # A dry-run answers in a different shape from a confirm, so the preview
         # schema is named rather than left for an agent to discover by running.
-        "dry_run_output_schema": "layer_set_preview",
+        "dry_run_output_schema": "layer_batch_preview",
         "examples": [
             f'{TOOL} layer set --file "bracket.dwg" --names DIMS --color 3 --dry-run --compact',
             f'{TOOL} layer set --file "bracket.dwg" --names DIMS --color 3'
@@ -525,6 +604,20 @@ def take_list(flags: list[str], *names: str) -> list[str]:
                 break
             collected.extend(part.strip() for part in value.split(",") if part.strip())
     return collected
+
+
+def take_continue_on_error(flags: list[str]) -> bool:
+    """`--continue-on-error` defaults to true (CLI-SPEC section 15.5)."""
+    raw_value = take_value(flags, "--continue-on-error")
+    if raw_value is None:
+        return True
+    if raw_value not in ("true", "false"):
+        raise UsageError(
+            "--continue-on-error must be true or false",
+            flag="--continue-on-error",
+            got=raw_value,
+        )
+    return raw_value == "true"
 
 
 def take_boolean(flags: list[str], flag: str) -> bool:
@@ -749,6 +842,45 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         target = require_file(flags)
         reject_unknown(flags)
         return emit_ok(drawing.xrefs(target), options, timer)
+    if name in ("layer create", "layer delete"):
+        target = require_file(flags)
+        wanted = take_list(flags, "--names", "--name")
+        if not wanted:
+            raise UsageError("--names is required", flag="--names")
+        dry_run = take_boolean(flags, "--dry-run")
+        token = take_value(flags, "--confirm")
+        keep_going = take_continue_on_error(flags)
+        if name == "layer create":
+            colour = take_int(flags, "--color")
+            linetype = take_value(flags, "--linetype")
+            reject_unknown(flags)
+            return emit_ok(
+                drawing.create_layers(
+                    target,
+                    wanted,
+                    color=7 if colour is None else colour,
+                    linetype=linetype or "Continuous",
+                    dry_run=dry_run,
+                    confirm_token=token,
+                    continue_on_error=keep_going,
+                ),
+                options,
+                timer,
+            )
+        dangerous = take_boolean(flags, "--dangerous")
+        reject_unknown(flags)
+        return emit_ok(
+            drawing.delete_layers(
+                target,
+                wanted,
+                dangerous=dangerous,
+                dry_run=dry_run,
+                confirm_token=token,
+                continue_on_error=keep_going,
+            ),
+            options,
+            timer,
+        )
     if name == "layer set":
         target = require_file(flags)
         # `--name` is the deprecated singular alias kept for compatibility; both
@@ -762,13 +894,7 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         locked = take_switch(flags, "--lock", "--unlock")
         dry_run = take_boolean(flags, "--dry-run")
         token = take_value(flags, "--confirm")
-        keep_going = take_value(flags, "--continue-on-error")
-        if keep_going is not None and keep_going not in ("true", "false"):
-            raise UsageError(
-                "--continue-on-error must be true or false",
-                flag="--continue-on-error",
-                got=keep_going,
-            )
+        keep_going = take_continue_on_error(flags)
         reject_unknown(flags)
         return emit_ok(
             drawing.set_layers(
@@ -780,7 +906,7 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
                 locked=locked,
                 dry_run=dry_run,
                 confirm_token=token,
-                continue_on_error=keep_going != "false",
+                continue_on_error=keep_going,
             ),
             options,
             timer,

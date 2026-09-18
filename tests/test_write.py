@@ -349,3 +349,116 @@ def test_colour_outside_the_index_is_rejected(writable, target):
 def test_duplicate_targets_collapse_but_keep_order(writable, target, monkeypatch):
     """Order is what an agent maps results back onto."""
     assert drawing._resolve_targets(["b", "a", "b", "c", "a"]) == ["b", "a", "c"]
+
+
+# --- create / delete and the dangerous gate -----------------------------------
+
+
+@needs_autocad
+def test_layer_create_adds_layers_and_reports_collisions(writable, tmp_path):
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    existing = drawing.layers(work)["layers"][0]["name"]
+    fresh = "AUTO-CAD-CLI-TEST"
+
+    preview = drawing.create_layers(work, [fresh, existing], color=4, dry_run=True)
+    assert [c["id"] for c in preview["preview"]["changes"]] == [fresh]
+    assert preview["preview"]["already_present"] == [existing]
+
+    applied = drawing.create_layers(
+        work, [fresh, existing], color=4, confirm_token=preview["confirm_token"]
+    )
+    assert applied["summary"] == {"total": 2, "succeeded": 1, "failed": 1}
+    by_target = {item["target"]: item for item in applied["items"]}
+    assert by_target[fresh]["ok"] is True
+    assert by_target[fresh]["after"]["color"] == 4
+    # Creating over an existing layer is a conflict, not a quiet success: the
+    # caller asked for these properties and the incumbent may have others.
+    assert by_target[existing]["error"]["code"] == "E_CONFLICT"
+
+    assert fresh in {layer["name"] for layer in drawing.layers(work)["layers"]}
+
+
+@needs_autocad
+def test_layer_delete_needs_dangerous_as_well_as_a_token(writable, tmp_path):
+    """Two independent gates: neither alone does anything (CLI-SPEC 15.4)."""
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    doomed = "AUTO-CAD-CLI-DOOMED"
+    created = drawing.create_layers(work, [doomed], dry_run=True)
+    drawing.create_layers(work, [doomed], confirm_token=created["confirm_token"])
+
+    preview = drawing.delete_layers(work, [doomed], dry_run=True)
+    assert preview["preview"]["requires"] == "--dangerous"
+
+    with pytest.raises(autocad.EngineError) as caught:
+        drawing.delete_layers(work, [doomed], confirm_token=preview["confirm_token"])
+    assert caught.value.code == "E_CONFIRMATION_REQUIRED"
+    # The refusal must not have spent the token.
+    assert doomed in {layer["name"] for layer in drawing.layers(work)["layers"]}
+
+    applied = drawing.delete_layers(
+        work, [doomed], dangerous=True, confirm_token=preview["confirm_token"]
+    )
+    assert applied["summary"]["succeeded"] == 1
+    assert doomed not in {layer["name"] for layer in drawing.layers(work)["layers"]}
+
+
+@needs_autocad
+def test_layer_delete_explains_what_it_will_not_touch(writable, tmp_path):
+    """AutoCAD reports refusal and success identically, so the preview must not."""
+    work = tmp_path / "work.dwg"
+    work.write_bytes(SAMPLE.read_bytes())
+    populated = next(
+        layer["name"]
+        for layer in drawing.layers(work)["layers"]
+        if layer["name"] != "0" and drawing.entities(work)["total"]
+    )
+
+    preview = drawing.delete_layers(work, ["0", populated, "ghost"], dry_run=True)
+    blocked = preview["preview"]["blocked"]
+    assert "cannot be deleted" in blocked["0"]
+    assert blocked["ghost"] == "no such layer"
+
+    applied = drawing.delete_layers(
+        work,
+        ["0", populated, "ghost"],
+        dangerous=True,
+        confirm_token=preview["confirm_token"],
+    )
+    by_target = {item["target"]: item for item in applied["items"]}
+    assert by_target["0"]["ok"] is False
+    assert by_target["ghost"]["error"]["code"] == "E_NOT_FOUND"
+    # Layer 0 is still there; the tool did not quietly pretend otherwise.
+    assert "0" in {layer["name"] for layer in drawing.layers(work)["layers"]}
+
+
+def test_delete_is_declared_dangerous_in_the_reference():
+    code, stdout = run("reference", "--command", "layer delete", "--compact")
+    assert code == 0
+    command = json.loads(stdout)["data"]["commands"][0]
+    assert command["type"] == "write"
+    assert command["dangerous"] is True
+    assert any("--dangerous" in example for example in command["examples"])
+
+
+def test_create_is_not_declared_dangerous():
+    code, stdout = run("reference", "--command", "layer create", "--compact")
+    command = json.loads(stdout)["data"]["commands"][0]
+    assert command["dangerous"] is False
+
+
+@pytest.mark.parametrize("command", [("layer", "create"), ("layer", "delete")])
+def test_new_writes_are_refused_without_permission(state, target, command):
+    code, stdout = run(
+        *command,
+        "--file",
+        str(target),
+        "--names",
+        "X",
+        "--dry-run",
+        "--compact",
+        env_extra={confirm.ENV_STATE_DIR: str(state)},
+    )
+    assert code == 4
+    assert json.loads(stdout)["error"]["code"] == "E_FORBIDDEN"

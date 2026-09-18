@@ -54,6 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AUTO_CAD_CLI_STATE_DIR` relocates the permission config, confirm secret,
   ledger and backups, so tests never touch the operator's real state.
 
+- `layer create`: add layers in a batch. Additive and reversible, so no
+  `--dangerous` gate; a name that already exists comes back as that item's own
+  `E_CONFLICT` rather than quietly succeeding against a layer whose properties
+  may be entirely different.
+- `layer delete`: remove layers, behind two independent gates. `--dangerous`
+  declares the intent and the confirm token authorises the resolved set;
+  a valid token without the flag is still refused, and the refusal does not
+  spend the token. The dry-run reports which targets will survive and why -
+  layer 0, the current layer and any layer holding objects cannot be deleted -
+  because AutoCAD's own delete reports refusal and success identically.
+
 ### Fixed
 
 - Scripts handed to the AutoCAD core engine are now written in the system

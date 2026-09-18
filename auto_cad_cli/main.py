@@ -1,8 +1,8 @@
 """Entry point: global flag parsing, dispatch, and the self-describing commands.
 
-AutoCAD capability is deliberately absent at this stage. The contract is the
-foundation the rest is built on (AGENT.md workflow A, step 2), so it ships and
-is testable before the first drawing command exists.
+Drawing commands are read-only and served by the headless core engine, so they
+run without an AutoCAD window and cannot disturb one that is open. There is no
+write path yet; `doctor` says so rather than leaving an agent to infer it.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, changelog
+from . import __version__, autocad, changelog, drawing
 from .contract_gen import CODES
 from .envelope import Options, Timer, emit_error, emit_ok
 
@@ -28,6 +28,9 @@ HELP = f"""{TOOL} {__version__} - agent-native CLI for Autodesk AutoCAD
 Usage: {TOOL} <command> [flags]
 
 Commands:
+  drawing info --file <dwg>      Identity, units, extents, layouts, object counts
+  layer list --file <dwg>        Layer table with colour and on/frozen/locked state
+
   reference [--command <path>]   Declared capabilities, schemas and error codes
   context                        Runtime environment, configuration, credentials
   doctor                         Environment and release-readiness health checks
@@ -54,8 +57,9 @@ RELEASE_READINESS = {
     "live_smoke_required_for_stable": True,
     "live_smoke_status": "missing",
     "reason": (
-        "Skeleton: the machine contract and self-describing commands exist, but no "
-        "AutoCAD capability is implemented and no drawing has ever been opened."
+        "Read-only drawing commands run against a real AutoCAD install through the "
+        "headless core engine, but there is no write path, no mock-upstream contract "
+        "suite, and no recorded live smoke evidence."
     ),
     "required_evidence": [
         "functional_contract_coverage_100",
@@ -92,6 +96,26 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "untrusted_fields": [],
     },
     "version": {"shape": "object", "fields": ["tool", "version"], "untrusted_fields": []},
+    "drawing_info": {
+        "shape": "object",
+        "fields": [
+            "path",
+            "name",
+            "directory",
+            "format_version",
+            "units",
+            "counts",
+            "layouts",
+            "extents",
+        ],
+        # Authored by whoever produced the DWG, not by the caller.
+        "untrusted_fields": ["name", "directory", "layouts"],
+    },
+    "layer_list": {
+        "shape": "object",
+        "fields": ["layers", "count", "total", "truncated"],
+        "untrusted_fields": ["layers"],
+    },
 }
 
 COMMANDS: list[dict[str, Any]] = [
@@ -148,6 +172,54 @@ COMMANDS: list[dict[str, Any]] = [
             f"{TOOL} changelog --compact",
             # Derived so the example stays runnable across bumps.
             f"{TOOL} changelog --since {__version__} --compact",
+        ],
+    },
+    {
+        "path": "drawing info",
+        "type": "read",
+        "description": (
+            "Identity, units, extents, layouts and object counts for one drawing. "
+            "Opens it read-only in the headless core engine; never touches an open editor."
+        ),
+        "params": [
+            {
+                "name": "file",
+                "type": "string",
+                "required": True,
+                "multiple": False,
+                "description": "Path to a .dwg (or .dwt) file.",
+            }
+        ],
+        "output_schema": "drawing_info",
+        "examples": [f'{TOOL} drawing info --file "C:/drawings/bracket.dwg" --compact'],
+    },
+    {
+        "path": "layer list",
+        "type": "read",
+        "description": (
+            "The layer table in table order, with colour, on/frozen/locked state "
+            "and linetype. A layer being off is distinct from it being frozen."
+        ),
+        "params": [
+            {
+                "name": "file",
+                "type": "string",
+                "required": True,
+                "multiple": False,
+                "description": "Path to a .dwg (or .dwt) file.",
+            },
+            {
+                "name": "limit",
+                "type": "integer",
+                "required": False,
+                "multiple": False,
+                "description": "Cap the returned layers; sets truncated:true when it bites.",
+            },
+        ],
+        "output_schema": "layer_list",
+        "examples": [
+            f'{TOOL} layer list --file "C:/drawings/bracket.dwg" --compact',
+            f'{TOOL} layer list --file "C:/drawings/bracket.dwg" --limit 20 --compact',
         ],
     },
 ]
@@ -231,6 +303,33 @@ def take_value(rest: list[str], flag: str) -> str | None:
     return value
 
 
+TWO_WORD_COMMANDS = frozenset(c["path"] for c in COMMANDS if " " in c["path"])
+
+
+def require_file(flags: list[str]) -> Path:
+    """Pull the mandatory `--file` and reject a path that is not there."""
+    raw = take_value(flags, "--file")
+    if raw is None:
+        raise UsageError("--file is required", flag="--file")
+    target = Path(raw).expanduser()
+    if not target.is_file():
+        raise autocad.EngineError("E_NOT_FOUND", "drawing file does not exist", file=str(target))
+    return target
+
+
+def take_int(flags: list[str], flag: str) -> int | None:
+    raw = take_value(flags, flag)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise UsageError(f"{flag} must be an integer", flag=flag, got=raw) from None
+    if value < 0:
+        raise UsageError(f"{flag} must not be negative", flag=flag, got=raw)
+    return value
+
+
 def build_reference(command: str | None) -> dict[str, Any]:
     commands = COMMANDS
     if command is not None:
@@ -267,21 +366,68 @@ def build_context() -> dict[str, Any]:
         "environment": {
             "platform": platform.system(),
             "python": platform.python_version(),
-            "autocad_integration": "not_implemented",
+            "autocad": _install_summary(),
+            # Reads go through the headless engine; driving a live editor over COM
+            # is a separate, not-yet-implemented path.
+            "channel": "accoreconsole",
+            "timeout_seconds": autocad.timeout_default(),
         },
+    }
+
+
+def _install_summary() -> dict[str, Any]:
+    install = autocad.preferred_install()
+    if install is None:
+        return {"found": False, "override_env": autocad.ENV_HOME}
+    engine = install.accoreconsole
+    return {
+        "found": True,
+        "release": install.release,
+        "product": install.product,
+        "location": str(install.location),
+        "language": install.language,
+        "accoreconsole": str(engine) if engine else None,
     }
 
 
 def build_doctor() -> dict[str, Any]:
     windows = platform.system() == "Windows"
     spec_pin = Path(__file__).resolve().parent.parent / ".agent" / "SPEC_VERSION"
-    checks = [
+    install = autocad.preferred_install()
+    engine = install.accoreconsole if install else None
+    progids = autocad.com_progids()
+
+    checks: list[dict[str, Any]] = [
         {
             "check": "platform_supported",
-            "status": "pass" if windows else "warn",
+            "status": "pass" if windows else "fail",
+            "fix": None if windows else "AutoCAD automation requires Windows",
+        },
+        {
+            "check": "autocad_installed",
+            "status": "pass" if install else "fail",
             "fix": None
-            if windows
-            else "AutoCAD automation needs Windows; only offline commands run here",
+            if install
+            else f"install AutoCAD, or point {autocad.ENV_HOME} at an existing installation",
+            "message": str(install.location) if install else None,
+        },
+        {
+            "check": "accoreconsole_present",
+            "status": "pass" if engine else "fail",
+            "fix": None
+            if engine
+            else "accoreconsole.exe is missing; every read command needs the headless core engine",
+            "message": str(engine) if engine else None,
+        },
+        {
+            # The bare AutoCAD.Application ProgID cannot be trusted (see autocad.py),
+            # so report which versioned one a live session would be reached through.
+            "check": "com_progid_registered",
+            "status": "pass" if progids else "warn",
+            "fix": None
+            if progids
+            else "no versioned AutoCAD.Application ProgID found; live-editor work is impossible",
+            "message": progids[0] if progids else None,
         },
         {
             "check": "spec_pin_declared",
@@ -291,14 +437,14 @@ def build_doctor() -> dict[str, Any]:
             else "restore .agent/SPEC_VERSION and re-sync the spec",
         },
         {
-            "check": "autocad_integration",
+            "check": "write_commands",
             "status": "warn",
-            "fix": f"not implemented at {__version__}; no drawing command exists yet",
+            "fix": "no write path exists yet; every command is read-only",
         },
         {
             "check": "release_readiness",
             "status": "fail",
-            "fix": "implement AutoCAD commands with command-level tests before claiming beta",
+            "fix": "add mock-upstream contract tests and live evidence before claiming beta",
         },
     ]
     return {"checks": checks}
@@ -319,8 +465,23 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
     if not rest:
         raise UsageError("no command given", hint="run reference for accepted commands")
 
-    name = rest[0]
-    flags = rest[1:]
+    # Two-word command paths are matched before single-word ones so that
+    # `drawing info` never resolves to a `drawing` command with a stray argument.
+    pair = " ".join(rest[:2])
+    if pair in TWO_WORD_COMMANDS:
+        name, flags = pair, rest[2:]
+    else:
+        name, flags = rest[0], rest[1:]
+
+    if name == "drawing info":
+        target = require_file(flags)
+        reject_unknown(flags)
+        return emit_ok(drawing.info(target), options, timer)
+    if name == "layer list":
+        target = require_file(flags)
+        limit = take_int(flags, "--limit")
+        reject_unknown(flags)
+        return emit_ok(drawing.layers(target, limit=limit), options, timer)
 
     if name == "reference":
         wanted = take_value(flags, "--command")
@@ -379,6 +540,9 @@ def main(argv: list[str] | None = None) -> int:
         return dispatch(rest, options, timer)
     except UsageError as error:
         return emit_error("E_USAGE", str(error), options, timer, error.details)
+    except autocad.EngineError as error:
+        # The engine layer already classified this against the canonical table.
+        return emit_error(error.code, error.message, options, timer, error.details)
     except KeyboardInterrupt:
         # Still hand the agent a parseable terminal envelope (CLI-SPEC section 14).
         return emit_error("E_INTERRUPTED", "cancelled by signal", options, timer)

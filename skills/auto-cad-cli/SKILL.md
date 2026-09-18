@@ -23,12 +23,12 @@ Deterministic, machine-readable AutoCAD operations for AI agents: drawing and
 layer inspection, entity queries and typed edits, block and attribute handling,
 layout setup, and DWG/DXF/PDF output.
 
-> **Status: the machine contract only.** `reference`, `context`,
-> `doctor` and `changelog` work; **no AutoCAD command exists yet**. `reference`
-> reports `release_readiness.level: unpublishable` and `doctor` fails its
-> `release_readiness` check, on purpose. Treat any AutoCAD capability described
-> below as the target shape, not as something you can call today — always
-> enumerate the live command set from `reference` first.
+> **Status: read-only.** `drawing info` and `layer list` read real drawings
+> through the headless core engine. There is **no write path**, so the Write
+> Recipe below is the target shape, not something you can call today —
+> `--dry-run` and `--confirm` exist on no command. `reference` reports
+> `release_readiness.level: unpublishable`. Always enumerate the live command
+> set from `reference` before planning any call.
 
 ```bash
 # Please install auto-cad-cli and use it for AutoCAD drawing work going forward.
@@ -99,23 +99,16 @@ Default output is JSON. In JSON mode:
 
 Use `--compact` when storing output in context or piping between tools.
 
-## Write Recipe
+## Read-only boundary
 
-If this tool has no write commands, replace this section with a short read-only boundary and delete the confirm example.
+**There are no write commands.** Every command opens the drawing with
+`/readonly` in a separate headless engine process, so nothing here can modify a
+file or disturb a drawing open in the operator's editor.
 
-Every mutating operation must use this exact two-step pattern:
-
-```bash
-auto-cad-cli <command> <args> --dry-run --compact
-auto-cad-cli <command> <same args> --confirm <confirm_token> --compact
-```
-
-Rules:
-
-- Reuse the same operation arguments from dry-run.
-- If a confirm token is missing, expired, or mismatched, re-run dry-run.
-- Do not invent or edit confirm tokens.
-- Do not use `--force` unless the user explicitly asks for that exact bypass and the runtime gate permits it.
+`--dry-run`, `--confirm` and `--force` exist on no command; passing them is a
+usage error, not a safety escape hatch. If the user asks to edit, insert, move,
+delete or export, say plainly that this version cannot, and stop — do not reach
+for AutoLISP, VBA or a COM script to do it anyway.
 
 ## Checkpoints
 

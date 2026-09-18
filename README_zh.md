@@ -23,11 +23,12 @@
 > 面向 AI Agent 的 Autodesk AutoCAD 图纸自动化 CLI。
 
 > [!WARNING]
-> **当前版本只有机器契约。** `reference`、`context`、`doctor`、`changelog` 可用；
-> **尚无任何 AutoCAD 命令**，也未发布到 npm。`reference` 报
+> **只读，且尚未发布到 npm。** `drawing info` 和 `layer list` 已能通过无头核心引擎
+> 读取真实 AutoCAD 图纸；**完全没有写入路径**。`reference` 报
 > `release_readiness.level: unpublishable`，`doctor` 的 `release_readiness` 检查
-> 故意为 fail。下文描述的是目标形态 —— 实际存在的命令集以 `reference` 为准。
-> 包发布前请从源码运行：`python -m auto_cad_cli.main reference --compact`。
+> 故意为 fail。下文凡是涉及写操作或已安装包的部分都是目标形态 —— 实际存在的命令集
+> 以 `reference` 为准。包发布前请从源码运行：
+> `python -m auto_cad_cli.main reference --compact`。
 
 ## Agent 安装
 
@@ -61,7 +62,8 @@ PowerShell 使用 `$env:NAME = "value"` 设置同样的环境变量。真实密�
 
 | 领域 | 命令 | Agent 用法 |
 |------|------|------------|
-| 核心领域 | `auto-cad-cli <domain> ...` | 替换为本工具暴露的主要命令组。 |
+| 图纸 | `drawing info` | 单个文件的标识、单位、范围、布局与对象计数。 |
+| 图层 | `layer list` | 图层表，含颜色与 开/冻结/锁定 状态。 |
 | 自描述 | `reference`, `context`, `doctor`, `changelog`, `update` | 用实时能力和版本变化引导 Agent。 |
 
 README 只做地图，不做完整手册。Agent 在执行任务命令前，应调用 `auto-cad-cli reference --compact` 获取准确的 flags、schemas、权限、退出码和错误码。

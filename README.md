@@ -23,12 +23,14 @@
 > Agent-native CLI for Autodesk AutoCAD drawing automation.
 
 > [!WARNING]
-> **This release is the machine contract only.** `reference`, `context`, `doctor` and
-> `changelog` work; **no AutoCAD command exists yet** and nothing is published to
-> npm. `reference` reports `release_readiness.level: unpublishable` and `doctor`
-> fails its `release_readiness` check, by design. Everything below describes the
-> target shape — run `reference` for the command set that actually exists.
-> Until the package ships, run it from a checkout: `python -m auto_cad_cli.main reference --compact`.
+> **Read-only, and not published to npm yet.** `drawing info` and `layer list`
+> work against a real AutoCAD install through the headless core engine; there is
+> **no write path at all**. `reference` reports
+> `release_readiness.level: unpublishable` and `doctor` fails its
+> `release_readiness` check, by design. Everything below that implies writes or
+> an installed package describes the target shape — run `reference` for the
+> command set that actually exists. Until the package ships, run it from a
+> checkout: `python -m auto_cad_cli.main reference --compact`.
 
 ## Agent Install
 
@@ -62,7 +64,8 @@ Worst-case risk tier: **T1** - it writes drawing files and drives a licensed Aut
 
 | Area | Commands | Agent use |
 |------|----------|-----------|
-| Core domain | `auto-cad-cli <domain> ...` | Replace with the main command groups this tool exposes. |
+| Drawing | `drawing info` | Identity, units, extents, layouts and object counts for one file. |
+| Layers | `layer list` | Layer table with colour and on/frozen/locked state. |
 | Self-description | `reference`, `context`, `doctor`, `changelog`, `update` | Bootstrap an Agent with live capabilities and version deltas. |
 
 The README is intentionally a map, not the full manual. Agents should call `auto-cad-cli reference --compact` for exact flags, schemas, permissions, exit codes, and error codes before executing task commands.

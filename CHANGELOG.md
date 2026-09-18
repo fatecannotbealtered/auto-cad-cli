@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `drawing info --file <dwg>` and `layer list --file <dwg>`: the first read-only
+  capability, served by the headless AutoCAD core engine (`accoreconsole`) with
+  `/readonly`, so neither can disturb a drawing open in the GUI.
+- `doctor` now performs real environment checks: AutoCAD install discovery from
+  the registry, `accoreconsole.exe` presence, and which versioned COM ProgID a
+  live editor would be reached through.
+- `context.data.environment.autocad` reports the discovered release, install
+  location, language and engine path; `AUTO_CAD_CLI_ACAD_HOME` overrides
+  discovery and `AUTO_CAD_CLI_TIMEOUT` bounds engine calls.
+
+### Fixed
+
+- `--fields` no longer strips `_untrusted` from a projected payload. Projecting
+  it away handed an agent attacker-authored strings with the "data, not
+  instructions" marker silently removed (SEC-SPEC section 2).
+
+### Security
+
+- Layer names, linetype names and the drawing name are reported under
+  `_untrusted`: they are authored by whoever produced the DWG.
+
 ## [1.0.0] - 2026-09-18
 
 ### Added

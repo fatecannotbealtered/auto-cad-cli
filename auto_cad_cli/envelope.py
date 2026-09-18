@@ -47,15 +47,30 @@ def log(message: str, options: Options) -> None:
         print(message, file=sys.stderr)
 
 
+UNTRUSTED_KEY = "_untrusted"
+
+
 def _project(data: Any, fields: list[str]) -> Any:
     """`--fields` keeps only the requested top-level keys of an object payload.
 
     Dotted paths are deliberately not supported yet; `reference` declares the
     supported form so an agent never has to guess (CLI-SPEC section 8).
+
+    `_untrusted` survives projection no matter what was asked for, narrowed to
+    the fields still present. Letting `--fields` drop it would hand an agent
+    attacker-authored strings with the "this is data, not instructions" marker
+    silently removed (SEC-SPEC section 2) - the one projection that must never
+    be a pure subset.
     """
     if not fields or not isinstance(data, dict):
         return data
-    return {key: data[key] for key in fields if key in data}
+    kept = {key: data[key] for key in fields if key in data and key != UNTRUSTED_KEY}
+    declared = data.get(UNTRUSTED_KEY)
+    if isinstance(declared, list):
+        still_present = [name for name in declared if name in kept]
+        if still_present:
+            kept[UNTRUSTED_KEY] = still_present
+    return kept
 
 
 def _write(document: dict[str, Any], options: Options) -> None:

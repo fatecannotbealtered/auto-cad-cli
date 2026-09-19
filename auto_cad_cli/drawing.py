@@ -13,6 +13,7 @@ external data authored by whoever produced the file. It is reported under
 
 from __future__ import annotations
 
+import math
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -38,6 +39,12 @@ INSUNITS = {
     16: "hectometers",
     21: "us-survey-feet",
 }
+
+_MODEL_SPACE = """; Geometry belongs in model space. `entmake` puts objects in whatever
+; space is current, and a drawing saved with a layout active opens with
+; paper space current - so without this every object lands in the layout,
+; with entity counts, extents and layers all looking perfectly correct.
+(setvar "TILEMODE" 1)"""
 
 # DXF group 70 on a LAYER table record.
 _FROZEN_BIT = 1
@@ -71,11 +78,17 @@ _INFO_BODY = """
 # Counts are accumulated inside AutoLISP rather than emitted per entity: a real
 # drawing holds tens of thousands of objects, and one record each would turn a
 # summary into a transfer.
+# Group 410 is the space an object lives in - "Model" or a layout name. It is
+# reported because entity counts, extents and layers can all look correct while
+# every object sits in the wrong space, which is invisible in a JSON payload and
+# obvious the moment anyone opens the drawing.
 _ENTITY_BODY = """
 (setq counts '())
 (setq e (entnext))
 (while e
-  (setq ty (cdr (assoc 0 (entget e))))
+  (setq d (entget e))
+  (setq ty (strcat (cdr (assoc 0 d)) "\\t"
+                   (if (assoc 410 d) (cdr (assoc 410 d)) "Model")))
   (setq hit (assoc ty counts))
   (if hit
     (setq counts (subst (cons ty (1+ (cdr hit))) hit counts))
@@ -342,11 +355,17 @@ def entities(drawing: Path, timeout: float | None = None) -> dict[str, Any]:
     """
     records = autocad.run_script(_ENTITY_BODY, drawing=drawing, readonly=True, timeout=timeout)
     by_type: dict[str, int] = {}
+    by_space: dict[str, int] = {}
+    model_by_type: dict[str, int] = {}
     for key, value in records:
         if key != "entity":
             continue
-        name, _, count = value.partition("\t")
-        by_type[name] = _as_int(count)
+        name, space, count = (value.split("\t") + ["", ""])[:3]
+        total = _as_int(count)
+        by_type[name] = by_type.get(name, 0) + total
+        by_space[space or "Model"] = by_space.get(space or "Model", 0) + total
+        if (space or "Model") == "Model":
+            model_by_type[name] = model_by_type.get(name, 0) + total
 
     scanned = _first(records, "scanned")
     if scanned is None:
@@ -357,6 +376,8 @@ def entities(drawing: Path, timeout: float | None = None) -> dict[str, Any]:
         )
     return {
         "by_type": dict(sorted(by_type.items(), key=lambda item: (-item[1], item[0]))),
+        "by_space": dict(sorted(by_space.items())),
+        "model_by_type": dict(sorted(model_by_type.items(), key=lambda item: (-item[1], item[0]))),
         "distinct_types": len(by_type),
         "total": _as_int(scanned),
         "scope": "model and paper space; block definition contents are not expanded",
@@ -1247,7 +1268,7 @@ def _draw_body(layer: str, shapes: list[tuple[str, tuple[float, ...]]]) -> str:
             f'  (write-line "drawn|{index}\\tyes" f)\n'
             f'  (write-line "drawn|{index}\\tno" f))'
         )
-    return "\n".join([*lines, '(command "_.QSAVE")', ""])
+    return "\n".join([_MODEL_SPACE, *lines, '(command "_.QSAVE")', ""])
 
 
 def _parse_tuple(raw: str, arity: int, label: str) -> tuple[float, ...]:
@@ -1313,7 +1334,7 @@ def parse_shapes(kind: str, raw_values: list[str]) -> list[tuple[str, tuple[floa
     polylines = []
     for value in raw_values:
         closed = value.endswith(":closed")
-        numbers = _coordinates(value[: -len(":closed")] if closed else value)
+        numbers = coordinates(value[: -len(":closed")] if closed else value)
         if len(numbers) < 4 or len(numbers) % 2:
             raise autocad.EngineError(
                 "E_VALIDATION",
@@ -1325,7 +1346,7 @@ def parse_shapes(kind: str, raw_values: list[str]) -> list[tuple[str, tuple[floa
     return polylines
 
 
-def _coordinates(raw: str) -> list[float]:
+def coordinates(raw: str) -> list[float]:
     try:
         return [float(part.strip()) for part in raw.split(",") if part.strip()]
     except ValueError:
@@ -1372,7 +1393,7 @@ def draw(
         )
 
     dxf_type = DRAW_DXF_TYPES[kind]
-    before = entities(drawing, timeout=timeout)["by_type"].get(dxf_type, 0)
+    before = entities_of_type(drawing, dxf_type, timeout)
 
     scope = confirm.scope(
         command=f"draw {kind}",
@@ -1426,7 +1447,7 @@ def draw(
         index, _, outcome = value.partition("\t")
         outcomes[index] = outcome
 
-    after = entities(drawing, timeout=timeout)["by_type"].get(dxf_type, 0)
+    after = entities_of_type(drawing, dxf_type, timeout)
     accepted = sum(1 for outcome in outcomes.values() if outcome == "yes")
 
     items = [
@@ -1621,3 +1642,446 @@ def export_dxf(
         },
         "_untrusted": [],
     }
+
+
+# --- arcs, dimensions, section lines, linetypes -------------------------------
+
+# A linear dimension is a real associative DIMENSION object, not lines and text
+# pretending to be one: `entmake` accepts it, verified on a real drawing. That
+# matters because a drawing whose dimensions are drawn rather than measured is
+# worthless the moment anyone edits the geometry.
+_DIM_BLOCK_CREATED = 32
+
+
+def _arc_entity(layer: str, cx: float, cy: float, radius: float, start: float, end: float) -> str:
+    return (
+        f'(list \'(0 . "ARC") (cons 8 "{_lisp_string(layer)}")'
+        f" (list 10 {cx} {cy} 0.0) (cons 40 {radius})"
+        f" (cons 50 {math.radians(start)}) (cons 51 {math.radians(end)}))"
+    )
+
+
+def _dim_entity(
+    layer: str,
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    line_point: tuple[float, float],
+    rotation: float,
+) -> str:
+    """A rotated (horizontal or vertical) linear dimension.
+
+    Group 13/14 are the points being measured, 10 places the dimension line and
+    11 the text. AutoCAD measures the distance itself; nothing here writes the
+    number, which is the whole point of using a real dimension object.
+    """
+    return (
+        f'(list \'(0 . "DIMENSION") \'(100 . "AcDbEntity") (cons 8 "{_lisp_string(layer)}")'
+        f' \'(100 . "AcDbDimension")'
+        f" (list 10 {line_point[0]} {line_point[1]} 0.0)"
+        f" (list 11 {line_point[0]} {line_point[1]} 0.0)"
+        f' (cons 70 {_DIM_BLOCK_CREATED}) \'(1 . "") \'(3 . "Standard")'
+        f' \'(100 . "AcDbAlignedDimension")'
+        f" (list 13 {p1[0]} {p1[1]} 0.0) (list 14 {p2[0]} {p2[1]} 0.0)"
+        f' \'(100 . "AcDbRotatedDimension") (cons 50 {math.radians(rotation)}))'
+    )
+
+
+def _clip_scanline(
+    polygon: list[tuple[float, float]], angle: float, spacing: float
+) -> list[tuple[float, float, float, float]]:
+    """Section lines: parallel segments clipped to a closed polygon.
+
+    Computed here rather than asking AutoCAD for a HATCH because `entmake`
+    cannot produce one. The result is honest about what it is - real LINE
+    objects, not an associative fill that would follow a later edit of the
+    boundary.
+
+    Works by rotating the polygon so the lines are horizontal, walking
+    scanlines with an even-odd crossing rule, then rotating the segments back.
+    """
+    theta = math.radians(angle)
+    cos_t, sin_t = math.cos(-theta), math.sin(-theta)
+    rotated = [(x * cos_t - y * sin_t, x * sin_t + y * cos_t) for x, y in polygon]
+
+    lows = min(point[1] for point in rotated)
+    highs = max(point[1] for point in rotated)
+    if spacing <= 0 or highs - lows < spacing / 100:
+        return []
+
+    back_cos, back_sin = math.cos(theta), math.sin(theta)
+    segments: list[tuple[float, float, float, float]] = []
+
+    # Start half a step in so a scanline never lands exactly on a vertex, where
+    # the crossing count would be ambiguous.
+    y = lows + spacing / 2
+    while y < highs:
+        crossings: list[float] = []
+        for index in range(len(rotated)):
+            x1, y1 = rotated[index]
+            x2, y2 = rotated[(index + 1) % len(rotated)]
+            if (y1 <= y < y2) or (y2 <= y < y1):
+                crossings.append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
+        crossings.sort()
+        for start, end in zip(crossings[0::2], crossings[1::2], strict=False):
+            if end - start <= 0:
+                continue
+            segments.append(
+                (
+                    start * back_cos - y * back_sin,
+                    start * back_sin + y * back_cos,
+                    end * back_cos - y * back_sin,
+                    end * back_sin + y * back_cos,
+                )
+            )
+        y += spacing
+    return segments
+
+
+def _shape_body(layer: str, entities: list[str]) -> str:
+    lines = [
+        f"(if (entmake {entity})\n"
+        f'  (write-line "drawn|{index}\\tyes" f)\n'
+        f'  (write-line "drawn|{index}\\tno" f))'
+        for index, entity in enumerate(entities)
+    ]
+    return "\n".join([_MODEL_SPACE, *lines, '(command "_.QSAVE")', ""])
+
+
+def parse_arcs(raw_values: list[str]) -> list[tuple[float, ...]]:
+    arcs = []
+    for value in raw_values:
+        cx, cy, radius, start, end = _parse_tuple(value, 5, "--arcs")
+        if radius <= 0:
+            raise autocad.EngineError("E_VALIDATION", "an arc needs a positive radius", got=value)
+        if abs((end - start) % 360) < 1e-9 and end != start:
+            raise autocad.EngineError(
+                "E_VALIDATION", "an arc spanning a full turn is a circle", got=value
+            )
+        arcs.append((cx, cy, radius, start, end))
+    return arcs
+
+
+def parse_dims(raw_values: list[str]) -> list[tuple[float, ...]]:
+    dims = []
+    for value in raw_values:
+        x1, y1, x2, y2, lx, ly = _parse_tuple(value, 6, "--dims")
+        if (x1, y1) == (x2, y2):
+            raise autocad.EngineError(
+                "E_VALIDATION", "a dimension needs two different points", got=value
+            )
+        dims.append((x1, y1, x2, y2, lx, ly))
+    return dims
+
+
+def draw_arcs(
+    drawing: Path,
+    arcs: list[tuple[float, ...]],
+    *,
+    layer: str,
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Arcs, given centre, radius and start/end angles in degrees, counter-clockwise."""
+    return _draw_entities(
+        drawing,
+        "ARC",
+        [_arc_entity(layer, *arc) for arc in arcs],
+        [
+            dict(zip(("center_x", "center_y", "radius", "start_deg", "end_deg"), arc, strict=True))
+            for arc in arcs
+        ],
+        layer=layer,
+        command="draw arc",
+        dry_run=dry_run,
+        confirm_token=confirm_token,
+        timeout=timeout,
+    )
+
+
+def draw_dimensions(
+    drawing: Path,
+    dims: list[tuple[float, ...]],
+    *,
+    layer: str,
+    rotation: float | None = None,
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Linear dimensions measuring p1..p2, with the dimension line through a point.
+
+    Rotation defaults to whichever axis the two points are further apart on,
+    which is what a drafter means by "dimension this edge" nine times in ten.
+    """
+    entities, described = [], []
+    for x1, y1, x2, y2, lx, ly in dims:
+        angle = rotation
+        if angle is None:
+            angle = 0.0 if abs(x2 - x1) >= abs(y2 - y1) else 90.0
+        entities.append(_dim_entity(layer, (x1, y1), (x2, y2), (lx, ly), angle))
+        described.append(
+            {
+                "from": [x1, y1],
+                "to": [x2, y2],
+                "line_through": [lx, ly],
+                "rotation_deg": angle,
+                "measures": round(abs(x2 - x1) if angle == 0.0 else abs(y2 - y1), 6),
+            }
+        )
+    return _draw_entities(
+        drawing,
+        "DIMENSION",
+        entities,
+        described,
+        layer=layer,
+        command="dim linear",
+        dry_run=dry_run,
+        confirm_token=confirm_token,
+        timeout=timeout,
+    )
+
+
+def draw_section_lines(
+    drawing: Path,
+    polygon: list[tuple[float, float]],
+    *,
+    layer: str,
+    angle: float = 45.0,
+    spacing: float = 2.0,
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Fill a closed polygon with parallel section lines.
+
+    Not a HATCH. `entmake` cannot build one, so these are real LINE objects
+    computed against the boundary - which means they will not follow a later
+    edit of that boundary. `reference` says so rather than letting a caller
+    assume associativity they do not have.
+    """
+    if len(polygon) < 3:
+        raise autocad.EngineError(
+            "E_VALIDATION", "a section boundary needs at least three points", got=len(polygon)
+        )
+    if spacing <= 0:
+        raise autocad.EngineError("E_VALIDATION", "spacing must be positive", got=spacing)
+
+    segments = _clip_scanline(polygon, angle, spacing)
+    if not segments:
+        raise autocad.EngineError(
+            "E_VALIDATION",
+            "the spacing is larger than the region, so no section line would land in it",
+            spacing=spacing,
+        )
+    entities = [
+        f'(list \'(0 . "LINE") (cons 8 "{_lisp_string(layer)}")'
+        f" (list 10 {x1} {y1} 0.0) (list 11 {x2} {y2} 0.0))"
+        for x1, y1, x2, y2 in segments
+    ]
+    described = [{"x1": x1, "y1": y1, "x2": x2, "y2": y2} for x1, y1, x2, y2 in segments]
+    return _draw_entities(
+        drawing,
+        "LINE",
+        entities,
+        described,
+        layer=layer,
+        command="draw section-lines",
+        dry_run=dry_run,
+        confirm_token=confirm_token,
+        timeout=timeout,
+    )
+
+
+def _draw_entities(
+    drawing: Path,
+    dxf_type: str,
+    entities: list[str],
+    described: list[dict[str, Any]],
+    *,
+    layer: str,
+    command: str,
+    dry_run: bool,
+    confirm_token: str | None,
+    timeout: float | None,
+) -> dict[str, Any]:
+    """Shared gate and verification for every entity-creating command."""
+    confirm.require_write_permission()
+    if not entities:
+        raise autocad.EngineError("E_VALIDATION", "nothing to draw")
+
+    known = {entry["name"] for entry in layers(drawing, timeout=timeout)["layers"]}
+    if layer not in known:
+        raise autocad.EngineError(
+            "E_NOT_FOUND",
+            f"the drawing has no layer named {layer!r}; create it first",
+            layer=layer,
+            available=sorted(known)[:40],
+        )
+
+    before = entities_of_type(drawing, dxf_type, timeout)
+    scope = confirm.scope(
+        command=command,
+        target=drawing,
+        arguments={"layer": layer, "entities": described},
+        observed={"existing_of_type": before, "dxf_type": dxf_type},
+    )
+
+    if dry_run:
+        token = confirm.mint(scope)
+        return {
+            "preview": {
+                "action": "create",
+                "resource": dxf_type.lower(),
+                "layer": layer,
+                "total": len(entities),
+                "changes": [
+                    {
+                        "action": "create",
+                        "resource": dxf_type.lower(),
+                        "id": f"#{index}",
+                        "before": None,
+                        "after": item,
+                    }
+                    for index, item in enumerate(described)
+                ],
+            },
+            "confirm_token": token.value,
+            "expires_at": token.expires_at,
+            "_untrusted": ["preview"],
+        }
+
+    if confirm_token is None:
+        raise autocad.EngineError(
+            "E_CONFIRMATION_REQUIRED",
+            "run the same command with --dry-run to obtain a confirm token",
+        )
+    confirm.verify_and_consume(confirm_token, scope)
+
+    backup_path = confirm.backup(drawing)
+    records = autocad.run_script(
+        _shape_body(layer, entities), drawing=drawing, readonly=False, timeout=timeout
+    )
+    outcomes = {}
+    for key, value in records:
+        if key == "drawn":
+            index, _, outcome = value.partition("\t")
+            outcomes[index] = outcome
+
+    after = entities_of_type(drawing, dxf_type, timeout)
+    accepted = sum(1 for outcome in outcomes.values() if outcome == "yes")
+    items = [
+        {
+            "target": f"#{index}",
+            "ok": outcomes.get(str(index)) == "yes",
+            "shape": item,
+            **(
+                {}
+                if outcomes.get(str(index)) == "yes"
+                else {"error": {"code": "E_SERVER", "retryable": True}}
+            ),
+        }
+        for index, item in enumerate(described)
+    ]
+
+    result = _batch_result(items, [], backup_path)
+    result["layer"] = layer
+    result["verification"] = {
+        "level": "reopened-and-counted",
+        "dxf_type": dxf_type,
+        "before": before,
+        "after": after,
+        "expected_delta": accepted,
+        "matches": after - before == accepted,
+    }
+    return result
+
+
+def entities_of_type(drawing: Path, dxf_type: str, timeout: float | None = None) -> int:
+    """Model-space count only: a draw that landed in a layout has not worked."""
+    return entities(drawing, timeout=timeout)["model_by_type"].get(dxf_type, 0)
+
+
+def load_linetypes(
+    drawing: Path,
+    names: list[str],
+    *,
+    dry_run: bool = False,
+    confirm_token: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Load linetype definitions from AutoCAD's own acadiso.lin.
+
+    A fresh drawing carries only CONTINUOUS, so asking for a CENTER line before
+    loading it silently produces a solid one - a centre line that does not look
+    like a centre line is a drafting error nobody notices in a JSON payload.
+    """
+    confirm.require_write_permission()
+    targets = _resolve_targets([name.upper() for name in names])
+
+    present = _loaded_linetypes(drawing, timeout)
+    missing = [name for name in targets if name not in present]
+
+    scope = confirm.scope(
+        command="linetype load",
+        target=drawing,
+        arguments={"names": targets},
+        observed={"already_loaded": sorted(present & set(targets))},
+    )
+    if dry_run:
+        token = confirm.mint(scope)
+        return {
+            "preview": {
+                "action": "load",
+                "resource": "linetype",
+                "total": len(targets),
+                "targets": targets,
+                "changes": [
+                    {"action": "load", "resource": "linetype", "id": name, "before": None}
+                    for name in missing
+                ],
+                "already_loaded": [name for name in targets if name in present],
+            },
+            "confirm_token": token.value,
+            "expires_at": token.expires_at,
+            "_untrusted": ["preview"],
+        }
+
+    if confirm_token is None:
+        raise autocad.EngineError(
+            "E_CONFIRMATION_REQUIRED",
+            "run the same command with --dry-run to obtain a confirm token",
+        )
+    confirm.verify_and_consume(confirm_token, scope)
+
+    backup_path = confirm.backup(drawing) if missing else None
+    if missing:
+        loads = "\n".join(
+            f'(command "_.-LINETYPE" "_Load" "{_lisp_string(name)}" "acadiso.lin" "")'
+            for name in missing
+        )
+        autocad.run_script(
+            loads + '\n(command "_.QSAVE")\n', drawing=drawing, readonly=False, timeout=timeout
+        )
+
+    after = _loaded_linetypes(drawing, timeout)
+    items = [
+        {
+            "target": name,
+            "ok": name in after,
+            **({} if name in after else {"error": {"code": "E_NOT_FOUND", "retryable": False}}),
+        }
+        for name in targets
+    ]
+    return _batch_result(items, [], backup_path)
+
+
+def _loaded_linetypes(drawing: Path, timeout: float | None) -> set[str]:
+    body = """
+(setq e (tblnext "LTYPE" T))
+(while e
+  (write-line (strcat "ltype|" (cdr (assoc 2 e))) f)
+  (setq e (tblnext "LTYPE")))
+"""
+    records = autocad.run_script(body, drawing=drawing, readonly=True, timeout=timeout)
+    return {value.upper() for key, value in records if key == "ltype"}

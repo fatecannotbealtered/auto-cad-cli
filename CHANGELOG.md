@@ -91,7 +91,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports `level: "reopened-and-counted"`. That is weaker than identifying each
   new object, and the payload says so rather than implying more than it checked.
 
+- `draw arc`, `dim linear`, `draw section-lines` and `linetype load`: the
+  drafting set a section view actually needs. Dimensions are real associative
+  DIMENSION objects - AutoCAD measures the distance itself, so the number stays
+  true if the geometry is edited. Section lines are honestly named: `entmake`
+  cannot create a HATCH, so these are LINE objects computed against the
+  boundary and will not follow a later edit of it.
+
 ### Fixed
+
+- Geometry now lands in **model space**. `entmake` puts objects in whatever
+  space is current, and a drawing saved with a layout active opens with paper
+  space current - so every object went into the layout while entity counts,
+  extents and layers all looked perfectly correct. Found only by opening the
+  result in AutoCAD. `entity summary` now reports `by_space` and
+  `model_by_type`, and a draw verifies against the model-space count, so the
+  same mistake fails loudly next time.
 
 - Scripts handed to the AutoCAD core engine are now written in the system
   codepage, which is what it actually reads. UTF-8 did not degrade gracefully:

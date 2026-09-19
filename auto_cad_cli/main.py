@@ -49,6 +49,10 @@ Write commands (need write permission, then --dry-run -> --confirm):
   draw circle --file <dwg> --layer <L> --circles cx,cy,r [--circles ...]
   draw text --file <dwg> --layer <L> --texts "x,y,height,content" [--texts ...]
   draw polyline --file <dwg> --layer <L> --polylines x1,y1,x2,y2,...[:closed]
+  draw arc --file <dwg> --layer <L> --arcs cx,cy,r,start_deg,end_deg
+  dim linear --file <dwg> --layer <L> --dims x1,y1,x2,y2,line_x,line_y
+  draw section-lines --file <dwg> --layer <L> --boundary x1,y1,... [--spacing 2]
+  linetype load --file <dwg> --names CENTER,HIDDEN
   export dxf --file <dwg> --out <path.dxf> [--dxf-version 2018] [--overwrite]
 
   reference [--command <path>]   Declared capabilities, schemas and error codes
@@ -178,6 +182,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "shape": "object",
         "fields": ["out", "written", "bytes", "version", "precision", "verification"],
         "untrusted_fields": [],
+    },
+    "linetype_result": {
+        "shape": "object",
+        "fields": ["items", "summary", "verification", "backup", "backup_note"],
+        "untrusted_fields": ["items"],
     },
     "xref_list": {
         "shape": "object",
@@ -494,6 +503,131 @@ COMMANDS: list[dict[str, Any]] = [
             " --polylines 0,0,120,0,120,80,0,80:closed --dry-run --compact",
             f'{TOOL} draw polyline --file "bracket.dwg" --layer OUTLINE'
             " --polylines 0,0,120,0,120,80,0,80:closed --confirm <confirm_token> --compact",
+        ],
+    },
+    {
+        "path": "draw arc",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Draw arcs on an existing layer. Each value is "
+            "center_x,center_y,radius,start_deg,end_deg, measured "
+            "counter-clockwise as AutoCAD does."
+        ),
+        "params": [
+            FILE_PARAM,
+            LAYER_PARAM,
+            {
+                "name": "arcs",
+                "type": "string",
+                "required": True,
+                "multiple": True,
+                "description": "cx,cy,r,start_deg,end_deg per arc; repeat the flag for more.",
+            },
+        ],
+        "output_schema": "draw_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} draw arc --file "part.dwg" --layer OUTLINE'
+            " --arcs 10,10,5,0,90 --dry-run --compact",
+            f'{TOOL} draw arc --file "part.dwg" --layer OUTLINE'
+            " --arcs 10,10,5,0,90 --confirm <confirm_token> --compact",
+        ],
+    },
+    {
+        "path": "dim linear",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Add associative linear dimensions. Each value is "
+            "x1,y1,x2,y2,line_x,line_y - the two measured points and a point "
+            "the dimension line passes through. AutoCAD measures the distance "
+            "itself, so the number stays true if the geometry is edited later. "
+            "Rotation defaults to whichever axis the points are further apart on."
+        ),
+        "params": [
+            FILE_PARAM,
+            LAYER_PARAM,
+            {
+                "name": "dims",
+                "type": "string",
+                "required": True,
+                "multiple": True,
+                "description": "x1,y1,x2,y2,line_x,line_y per dimension; repeat for more.",
+            },
+            {
+                "name": "rotation",
+                "type": "number",
+                "required": False,
+                "multiple": False,
+                "description": "Force 0 (horizontal) or 90 (vertical) instead of inferring.",
+            },
+        ],
+        "output_schema": "draw_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} dim linear --file "part.dwg" --layer DIMS'
+            " --dims 0,0,120,0,60,-10 --dry-run --compact",
+            f'{TOOL} dim linear --file "part.dwg" --layer DIMS'
+            " --dims 0,0,120,0,60,-10 --confirm <confirm_token> --compact",
+        ],
+    },
+    {
+        "path": "draw section-lines",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Fill a closed polygon with parallel section lines. These are real "
+            "LINE objects computed against the boundary, NOT an associative "
+            "HATCH - the core engine cannot create one - so they will not "
+            "follow a later edit of that boundary."
+        ),
+        "params": [
+            FILE_PARAM,
+            LAYER_PARAM,
+            {
+                "name": "boundary",
+                "type": "string",
+                "required": True,
+                "multiple": False,
+                "description": "x1,y1,x2,y2,... closed polygon, at least three points.",
+            },
+            {
+                "name": "angle",
+                "type": "number",
+                "required": False,
+                "multiple": False,
+                "description": "Line angle in degrees. Default 45.",
+            },
+            {
+                "name": "spacing",
+                "type": "number",
+                "required": False,
+                "multiple": False,
+                "description": "Distance between lines. Default 2.",
+            },
+        ],
+        "output_schema": "draw_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} draw section-lines --file "part.dwg" --layer HATCH'
+            " --boundary 0,0,10,0,10,5,0,5 --spacing 0.5 --dry-run --compact",
+        ],
+    },
+    {
+        "path": "linetype load",
+        "type": "write",
+        "dangerous": False,
+        "description": (
+            "Load linetype definitions from AutoCAD's acadiso.lin. A fresh "
+            "drawing carries only CONTINUOUS, so a centre line drawn before "
+            "CENTER is loaded comes out solid."
+        ),
+        "params": [FILE_PARAM, NAMES_PARAM],
+        "output_schema": "linetype_result",
+        "dry_run_output_schema": "layer_batch_preview",
+        "examples": [
+            f'{TOOL} linetype load --file "part.dwg" --names CENTER,HIDDEN --dry-run --compact',
         ],
     },
     {
@@ -1056,6 +1190,79 @@ def dispatch(rest: list[str], options: Options, timer: Timer) -> int:
         target = require_file(flags)
         reject_unknown(flags)
         return emit_ok(drawing.xrefs(target), options, timer)
+    if name in ("draw arc", "dim linear", "draw section-lines", "linetype load"):
+        target = require_file(flags)
+        preview_only = take_boolean(flags, "--dry-run")
+        token = take_value(flags, "--confirm")
+        if name == "linetype load":
+            wanted = take_list(flags, "--names")
+            if not wanted:
+                raise UsageError("--names is required", flag="--names")
+            reject_unknown(flags)
+            return emit_ok(
+                drawing.load_linetypes(target, wanted, dry_run=preview_only, confirm_token=token),
+                options,
+                timer,
+            )
+        layer = take_value(flags, "--layer")
+        if layer is None:
+            raise UsageError("--layer is required", flag="--layer")
+        if name == "draw arc":
+            values = take_repeated(flags, "--arcs")
+            if not values:
+                raise UsageError("--arcs is required", flag="--arcs")
+            reject_unknown(flags)
+            return emit_ok(
+                drawing.draw_arcs(
+                    target,
+                    drawing.parse_arcs(values),
+                    layer=layer,
+                    dry_run=preview_only,
+                    confirm_token=token,
+                ),
+                options,
+                timer,
+            )
+        if name == "dim linear":
+            values = take_repeated(flags, "--dims")
+            if not values:
+                raise UsageError("--dims is required", flag="--dims")
+            rotation = take_value(flags, "--rotation")
+            reject_unknown(flags)
+            return emit_ok(
+                drawing.draw_dimensions(
+                    target,
+                    drawing.parse_dims(values),
+                    layer=layer,
+                    rotation=float(rotation) if rotation is not None else None,
+                    dry_run=preview_only,
+                    confirm_token=token,
+                ),
+                options,
+                timer,
+            )
+        boundary = take_value(flags, "--boundary")
+        if boundary is None:
+            raise UsageError("--boundary is required", flag="--boundary")
+        angle = take_value(flags, "--angle")
+        spacing = take_value(flags, "--spacing")
+        reject_unknown(flags)
+        numbers = drawing.coordinates(boundary)
+        if len(numbers) < 6 or len(numbers) % 2:
+            raise UsageError("--boundary needs an even count of at least six numbers")
+        return emit_ok(
+            drawing.draw_section_lines(
+                target,
+                list(zip(numbers[::2], numbers[1::2], strict=True)),
+                layer=layer,
+                angle=45.0 if angle is None else float(angle),
+                spacing=2.0 if spacing is None else float(spacing),
+                dry_run=preview_only,
+                confirm_token=token,
+            ),
+            options,
+            timer,
+        )
     if name == "export dxf":
         target = require_file(flags)
         out = take_value(flags, "--out")
